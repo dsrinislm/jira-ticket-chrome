@@ -7,6 +7,31 @@ const jiraBaseUrlError = document.getElementById("jiraBaseUrlError");
 const projectKeyInput = document.getElementById("projectKey");
 const createTicketBtn = document.getElementById("createTicket");
 const projectTagsContainer = document.getElementById("projectTags");
+const singleView = document.getElementById("singleView");
+const bulkView = document.getElementById("bulkView");
+const tabSingle = document.getElementById("tabSingle");
+const tabBulk = document.getElementById("tabBulk");
+const fileInput = document.getElementById("fileInput");
+const fileError = document.getElementById("fileError");
+const fileSummary = document.getElementById("fileSummary");
+const previewSection = document.getElementById("previewSection");
+const previewBody = document.getElementById("previewBody");
+const selectAllCheckbox = document.getElementById("selectAllCheckbox");
+const selectionCount = document.getElementById("selectionCount");
+const importBtn = document.getElementById("importBtn");
+
+let bulkRows = [];
+
+document
+  .getElementById("tabSingle")
+  .addEventListener("click", () => switchView("single"));
+document
+  .getElementById("tabBulk")
+  .addEventListener("click", () => switchView("bulk"));
+
+selectAllCheckbox?.addEventListener("change", toggleSelectAll);
+fileInput?.addEventListener("change", handleFileSelected);
+importBtn?.addEventListener("click", runBulkImport);
 
 document.addEventListener("DOMContentLoaded", () => {
   loadInitialState();
@@ -34,7 +59,323 @@ function debounce(fn, delay) {
     timer = setTimeout(() => fn(...args), delay);
   };
 }
+function switchView(view) {
+  const isBulk = view === "bulk";
+  document.body.classList.toggle("view-bulk", isBulk);
 
+  singleView.style.display = isBulk ? "none" : "block";
+  bulkView.style.display = isBulk ? "block" : "none";
+
+  tabSingle.classList.toggle("active", !isBulk);
+  tabSingle.setAttribute("aria-selected", String(!isBulk));
+  tabBulk.classList.toggle("active", isBulk);
+  tabBulk.setAttribute("aria-selected", String(isBulk));
+
+  setStatus(
+    isBulk
+      ? "Choose an Excel file to begin."
+      : "Configure Jira details and create a ticket.",
+    "info",
+  );
+}
+
+// Plain-text Description column -> ADF. Blank lines separate paragraphs;
+// single newlines become hard breaks (ADF has no bare "\n" semantics).
+function textToADF(text) {
+  const normalized = String(text ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+  if (!normalized)
+    return {
+      version: 1,
+      type: "doc",
+      content: [{ type: "paragraph", content: [] }],
+    };
+
+  const blocks = normalized.split(/\n{2,}/);
+  const content = blocks.map((block) => {
+    const lines = block.split("\n");
+    const inline = [];
+    lines.forEach((line, i) => {
+      if (i > 0) inline.push({ type: "hardBreak" });
+      if (line.length) inline.push({ type: "text", text: line });
+    });
+    return { type: "paragraph", content: inline };
+  });
+
+  return { version: 1, type: "doc", content };
+}
+
+function handleFileSelected() {
+  const file = fileInput.files[0];
+  fileError.style.display = "none";
+  previewSection.style.display = "none";
+  bulkRows = [];
+
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const workbook = XLSX.read(e.target.result, { type: "array" });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+
+      const parsed = json
+        .map((record) => ({
+          name: String(record["Name"] ?? "").trim(),
+          description: String(record["Description"] ?? "").trim(),
+        }))
+        .filter((r) => r.name);
+
+      if (!parsed.length) {
+        fileError.textContent =
+          'No usable rows found — check for a "Name" column.';
+        fileError.style.display = "block";
+        return;
+      }
+
+      loadBulkRows(parsed);
+      fileSummary.textContent = `${parsed.length} row(s) loaded from "${file.name}".`;
+    } catch (err) {
+      fileError.textContent = `Couldn't read that file: ${err.message}`;
+      fileError.style.display = "block";
+    }
+  };
+  reader.onerror = () => {
+    fileError.textContent = "Failed to read the file.";
+    fileError.style.display = "block";
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function loadBulkRows(parsed) {
+  previewBody.innerHTML = "";
+  bulkRows = [];
+
+  parsed.forEach((record) => {
+    const title = `OCTANE | ${record.name}`;
+    const tr = document.createElement("tr");
+
+    const checkTd = document.createElement("td");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = true;
+    checkbox.addEventListener("change", updateSelectionCount);
+    checkTd.appendChild(checkbox);
+
+    const titleTd = document.createElement("td");
+    titleTd.innerHTML = `<span class="row-title">${escapeHtml(title)}</span>`;
+
+    const descTd = document.createElement("td");
+    descTd.className = "row-desc";
+    descTd.title = record.description;
+    descTd.textContent = record.description.slice(0, 100) || "—";
+
+    const statusTd = document.createElement("td");
+    statusTd.className = "row-status";
+    statusTd.dataset.state = "pending";
+    statusTd.textContent = "Not started";
+
+    tr.append(checkTd, titleTd, descTd, statusTd);
+    previewBody.appendChild(tr);
+
+    bulkRows.push({
+      title,
+      description: record.description,
+      checkbox,
+      statusEl: statusTd,
+    });
+  });
+
+  previewSection.style.display = "block";
+  updateSelectionCount();
+}
+
+function toggleSelectAll() {
+  bulkRows.forEach((r) => (r.checkbox.checked = selectAllCheckbox.checked));
+  updateSelectionCount();
+}
+
+function updateSelectionCount() {
+  const selected = bulkRows.filter((r) => r.checkbox.checked).length;
+  selectionCount.textContent = `${selected} of ${bulkRows.length} selected`;
+}
+
+function setRowStatus(row, state, html) {
+  row.statusEl.dataset.state = state;
+  row.statusEl.innerHTML = html;
+}
+function escapeJqlString(value) {
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+// Jira deprecated GET /rest/api/3/search in favor of the enhanced
+// JQL search endpoint — use that here.
+async function findExistingJiraIssue(jiraBaseUrl, projectKey, summary) {
+  const jql = `project = "${escapeJqlString(projectKey)}" AND summary ~ "${escapeJqlString(summary)}"`;
+
+  let response;
+  try {
+    response = await jiraFetch(jiraBaseUrl, "/rest/api/3/search/jql", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jql, fields: ["summary"], maxResults: 50 }),
+    });
+  } catch {
+    return { error: true, issue: null };
+  }
+
+  if (!response.ok) return { error: true, issue: null };
+
+  const data = await response.json();
+  const target = summary.trim().toLowerCase();
+  const match = (data.issues || []).find(
+    (issue) => issue.fields?.summary?.trim().toLowerCase() === target,
+  );
+
+  return { error: false, issue: match || null };
+}
+
+function renderTicketCard(issueKey, issueUrl) {
+  const safeKey = escapeHtml(issueKey);
+  const safeUrl = escapeHtml(issueUrl);
+
+  ticketResult.innerHTML = `
+        <div class="ticket-card">
+          <div class="ticket-key">
+            <a id="jiraIssueLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
+              ${safeKey}
+            </a>
+          </div>
+          <div class="ticket-url">
+            <a id="jiraUrlLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
+              ${safeUrl}
+            </a>
+          </div>
+        </div>
+      `;
+
+  ["jiraIssueLink", "jiraUrlLink"].forEach((id) => {
+    const link = document.getElementById(id);
+    link?.addEventListener("click", (e) => {
+      e.preventDefault();
+      chrome.tabs.create({ url: issueUrl });
+    });
+  });
+}
+
+async function runBulkImport() {
+  const urlValidation = validateJiraBaseUrlField();
+  if (!urlValidation.valid) {
+    setStatus(urlValidation.message, "error");
+    return;
+  }
+
+  const projectKey = projectKeyInput.value.trim().toUpperCase();
+  if (!projectKey) {
+    setStatus("Please enter a project key.", "error");
+    return;
+  }
+
+  const selectedRows = bulkRows.filter((r) => r.checkbox.checked);
+  if (!selectedRows.length) {
+    setStatus("Select at least one row to import.", "error");
+    return;
+  }
+
+  saveSettings();
+  const jiraOrigin = new URL(jiraBaseUrlInput.value.trim()).origin;
+
+  importBtn.disabled = true;
+  importBtn.dataset.loading = "true";
+  fileInput.disabled = true;
+
+  setStatus("Checking Jira session...", "loading");
+  if (!(await isJiraLoggedIn(jiraOrigin))) {
+    setStatus(
+      "Jira login required. Open Jira in a tab, log in, then retry.",
+      "error",
+    );
+    importBtn.disabled = false;
+    importBtn.dataset.loading = "false";
+    fileInput.disabled = false;
+    return;
+  }
+
+  setStatus("Validating project access...", "loading");
+  const projectValidation = await validateProject(jiraOrigin, projectKey);
+  if (!projectValidation.success) {
+    setStatus(projectValidation.message, "error");
+    importBtn.disabled = false;
+    importBtn.dataset.loading = "false";
+    fileInput.disabled = false;
+    return;
+  }
+
+  let created = 0,
+    skipped = 0,
+    failed = 0;
+
+  for (let i = 0; i < selectedRows.length; i++) {
+    const row = selectedRows[i];
+    setStatus(`Processing ${i + 1} of ${selectedRows.length}...`, "loading");
+    setRowStatus(row, "checking", "Checking…");
+
+    try {
+      const existing = await findExistingJiraIssue(
+        jiraOrigin,
+        projectKey,
+        row.title,
+      );
+
+      if (existing.error) {
+        setRowStatus(row, "error", "Duplicate check failed");
+        failed++;
+        continue;
+      }
+
+      if (existing.issue) {
+        const url = `${jiraOrigin}/browse/${existing.issue.key}`;
+        setRowStatus(
+          row,
+          "exists",
+          `Already exists — <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(existing.issue.key)}</a>`,
+        );
+        skipped++;
+        continue;
+      }
+
+      setRowStatus(row, "creating", "Creating…");
+      const issue = await createJiraIssue(
+        jiraOrigin,
+        projectKey,
+        row.title,
+        textToADF(row.description),
+      );
+      const url = `${jiraOrigin}/browse/${issue.key}`;
+      setRowStatus(
+        row,
+        "created",
+        `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>`,
+      );
+      created++;
+    } catch (err) {
+      setRowStatus(row, "error", escapeHtml(err.message || "Failed"));
+      failed++;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  setStatus(
+    `Done. ${created} created, ${skipped} already existed, ${failed} failed.`,
+    failed ? "error" : "success",
+  );
+  importBtn.disabled = false;
+  importBtn.dataset.loading = "false";
+  fileInput.disabled = false;
+}
 // Escapes text before it's interpolated into innerHTML. Project keys are
 // user input (and project history is persisted across sessions), and the
 // ticket key/url come back from the Jira API response — none of that
@@ -335,10 +676,12 @@ async function createTicket() {
       finalSummary,
     );
 
-    if (existing) {
-      const issueUrl = `${jiraUrl.origin}/browse/${existing.key}`;
-      setStatus(`Ticket already exists: ${existing.key}`, "success");
-      renderTicketCard(existing.key, issueUrl);
+    if (existing.error) {
+      // duplicate check itself failed — don't block creation over it, just proceed
+    } else if (existing.issue) {
+      const issueUrl = `${jiraUrl.origin}/browse/${existing.issue.key}`;
+      setStatus(`Ticket already exists: ${existing.issue.key}`, "success");
+      renderTicketCard(existing.issue.key, issueUrl);
       saveProjectHistory(projectKey);
       return;
     }
@@ -427,73 +770,6 @@ async function createTicket() {
       );
     }
 
-    function escapeJqlString(value) {
-      return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-    }
-
-    // Jira deprecated GET /rest/api/3/search in favor of the enhanced
-    // JQL search endpoint — use that here.
-    async function findExistingJiraIssue(jiraBaseUrl, projectKey, summary) {
-      const jql = `project = "${escapeJqlString(projectKey)}" AND summary ~ "${escapeJqlString(summary)}"`;
-
-      let response;
-      try {
-        response = await jiraFetch(jiraBaseUrl, "/rest/api/3/search/jql", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jql,
-            fields: ["summary"],
-            maxResults: 50,
-          }),
-        });
-      } catch {
-        return null; // network hiccup — don't block ticket creation over a dup check
-      }
-
-      if (!response.ok) return null;
-
-      const data = await response.json();
-      const target = summary.trim().toLowerCase();
-
-      return (
-        (data.issues || []).find(
-          (issue) => issue.fields?.summary?.trim().toLowerCase() === target,
-        ) || null
-      );
-    }
-    function renderTicketCard(issueKey, issueUrl) {
-      const safeKey = escapeHtml(issueKey);
-      const safeUrl = escapeHtml(issueUrl);
-
-      ticketResult.innerHTML = `
-        <div class="ticket-card">
-          <div class="ticket-key">
-            <a id="jiraIssueLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
-              ${safeKey}
-            </a>
-          </div>
-          <div class="ticket-url">
-            <a id="jiraUrlLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
-              ${safeUrl}
-            </a>
-          </div>
-        </div>
-      `;
-
-      ["jiraIssueLink", "jiraUrlLink"].forEach((id) => {
-        const link = document.getElementById(id);
-        link?.addEventListener("click", (e) => {
-          e.preventDefault();
-          chrome.tabs.create({ url: issueUrl });
-        });
-      });
-    }
-
-    const issueUrl = `${jiraUrl.origin}/browse/${issue.key}`;
-
-    setStatus(`Created ${issue.key}.`, "success");
-
     // issue.key / issueUrl come from the Jira API response — escape
     // before injecting into innerHTML rather than trusting the server.
     const safeKey = escapeHtml(issue.key);
@@ -522,6 +798,7 @@ async function createTicket() {
         chrome.tabs.create({ url: issueUrl });
       });
     });
+    const issueUrl = `${jiraUrl.origin}/browse/${issue.key}`;
     setStatus(`Created ${issue.key}.`, "success");
     renderTicketCard(issue.key, issueUrl);
     saveProjectHistory(projectKey);
