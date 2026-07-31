@@ -511,12 +511,6 @@ button:disabled {
   background: var(--text-muted);
 }
 
-/* The popup keeps one fixed width — switching between the single and
-   bulk views never resizes the window. */
-.view[style*="display: none"] {
-  display: none;
-}
-
 /* Tabs */
 
 .tabs {

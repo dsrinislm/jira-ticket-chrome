@@ -29,35 +29,8 @@ const progressBar = document.getElementById("progressBar");
 
 let bulkRows = [];
 
-document
-  .getElementById("tabSingle")
-  .addEventListener("click", () => switchView("single"));
-document
-  .getElementById("tabBulk")
-  .addEventListener("click", () => switchView("bulk"));
-
-selectAllCheckbox?.addEventListener("change", toggleSelectAll);
-fileInput?.addEventListener("change", handleFileSelected);
-importBtn?.addEventListener("click", runBulkImport);
-
-document.addEventListener("DOMContentLoaded", () => {
-  loadInitialState();
-
-  jiraBaseUrlInput.addEventListener("input", () => {
-    // Never introduce a new error while typing — only clear one that's
-    // already showing, the moment the value becomes valid again.
-    enforceJiraBaseUrlNoPath();
-    clearJiraBaseUrlErrorIfNowValid();
-    debouncedSaveSettings();
-  });
-
-  jiraBaseUrlInput.addEventListener("blur", validateJiraBaseUrlField);
-
-  projectKeyInput.addEventListener("input", debouncedSaveSettings);
-  createTicketBtn.addEventListener("click", createTicket);
-});
-
 const debouncedSaveSettings = debounce(saveSettings, 300);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function debounce(fn, delay) {
   let timer;
@@ -67,13 +40,33 @@ function debounce(fn, delay) {
   };
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The script loads at the end of <body>, so the DOM is already parsed —
+// no need to wait for DOMContentLoaded.
+loadInitialState();
+
+tabSingle.addEventListener("click", () => switchView("single"));
+tabBulk.addEventListener("click", () => switchView("bulk"));
+selectAllCheckbox.addEventListener("change", toggleSelectAll);
+fileInput.addEventListener("change", handleFileSelected);
+importBtn.addEventListener("click", runBulkImport);
+
+jiraBaseUrlInput.addEventListener("input", () => {
+  // Never introduce a new error while typing — only clear one that's
+  // already showing, the moment the value becomes valid again.
+  enforceJiraBaseUrlNoPath();
+  clearJiraBaseUrlErrorIfNowValid();
+  debouncedSaveSettings();
+});
+
+jiraBaseUrlInput.addEventListener("blur", validateJiraBaseUrlField);
+projectKeyInput.addEventListener("input", debouncedSaveSettings);
+createTicketBtn.addEventListener("click", createTicket);
 
 function switchView(view) {
   const isBulk = view === "bulk";
 
-  singleView.style.display = isBulk ? "none" : "block";
-  bulkView.style.display = isBulk ? "block" : "none";
+  singleView.hidden = isBulk;
+  bulkView.hidden = !isBulk;
 
   tabSingle.classList.toggle("active", !isBulk);
   tabSingle.setAttribute("aria-selected", String(!isBulk));
@@ -393,17 +386,8 @@ function renderTicketCard(issueKey, issueUrl) {
 }
 
 async function runBulkImport() {
-  const urlValidation = validateJiraBaseUrlField();
-  if (!urlValidation.valid) {
-    setStatus(urlValidation.message, "error");
-    return;
-  }
-
-  const projectKey = projectKeyInput.value.trim().toUpperCase();
-  if (!projectKey) {
-    setStatus("Please enter a project key.", "error");
-    return;
-  }
+  const ctx = getJiraContext();
+  if (!ctx) return;
 
   const selectedRows = bulkRows.filter((r) => r.checkbox.checked);
   if (!selectedRows.length) {
@@ -411,8 +395,8 @@ async function runBulkImport() {
     return;
   }
 
+  const { jiraOrigin, projectKey } = ctx;
   saveSettings();
-  const jiraOrigin = new URL(jiraBaseUrlInput.value.trim()).origin;
 
   setBulkBusy(true);
 
@@ -508,22 +492,20 @@ function updateProgress(completed, total, label) {
   progressSection.setAttribute("aria-valuenow", String(pct));
   progressLabel.textContent = label || `Importing ${completed} of ${total}…`;
 }
+const HTML_ESCAPES = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
 // Escapes text before it's interpolated into innerHTML. Project keys are
 // user input (and project history is persisted across sessions), and the
 // ticket key/url come back from the Jira API response — none of that
 // should be trusted enough to inject as raw markup.
 function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (c) =>
-    c === "&"
-      ? "&amp;"
-      : c === "<"
-        ? "&lt;"
-        : c === ">"
-          ? "&gt;"
-          : c === '"'
-            ? "&quot;"
-            : "&#39;",
-  );
+  return String(value ?? "").replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 }
 
 // Strips anything past the origin (path, query, hash) so the field can
@@ -677,6 +659,26 @@ function setBulkBusy(isBusy) {
   fileInput.disabled = isBusy;
 }
 
+// Validates the shared Jira fields for both the single-ticket and bulk
+// flows. Shows the first error and returns null on failure.
+function getJiraContext() {
+  const urlValidation = validateJiraBaseUrlField();
+  if (!urlValidation.valid) {
+    setStatus(urlValidation.message, "error");
+    return null;
+  }
+
+  const projectKey = projectKeyInput.value.trim().toUpperCase();
+  if (!projectKey) {
+    setStatus("Please enter a project key.", "error");
+    return null;
+  }
+
+  // Safe: validateJiraBaseUrlField() already confirmed this parses.
+  const jiraOrigin = new URL(jiraBaseUrlInput.value.trim()).origin;
+  return { jiraOrigin, projectKey };
+}
+
 // Single round trip to storage on popup open instead of two separate
 // get() calls (settings + project history) racing independently.
 function loadInitialState() {
@@ -770,22 +772,8 @@ async function createTicket() {
     loginBtn.style.display = "none";
     ticketResult.innerHTML = "";
 
-    const jiraBaseUrl = jiraBaseUrlInput.value.trim();
-    const projectKey = projectKeyInput.value.trim().toUpperCase();
-
-    const urlValidation = validateJiraBaseUrlField();
-    if (!urlValidation.valid) {
-      setStatus(urlValidation.message, "error");
-      return;
-    }
-
-    if (!projectKey) {
-      setStatus("Please enter a project key.", "error");
-      return;
-    }
-
-    // Safe: validateJiraBaseUrlField() already confirmed this parses.
-    const jiraUrl = new URL(jiraBaseUrl);
+    const { jiraOrigin, projectKey } = getJiraContext() || {};
+    if (!jiraOrigin || !projectKey) return;
 
     setStatus("Reading active QA ticket...", "loading");
 
@@ -793,14 +781,10 @@ async function createTicket() {
     try {
       pageData = await getPageData();
     } catch {
-      setStatus(
-        "Open the Octane ticket details page and try again.",
-        "error",
-      );
-      return;
+      pageData = null;
     }
 
-    if (!pageData.octaneID) {
+    if (!pageData?.octaneID) {
       setStatus(
         "Open the Octane ticket details page and try again.",
         "error",
@@ -809,41 +793,38 @@ async function createTicket() {
     }
 
     setStatus("Checking Jira session...", "loading");
-    const loggedIn = await isJiraLoggedIn(jiraUrl.origin);
+    const loggedIn = await isJiraLoggedIn(jiraOrigin);
 
     if (!loggedIn) {
-      redirectToLogin(jiraUrl.origin);
+      redirectToLogin(jiraOrigin);
       return;
     }
 
     setStatus("Validating project access...", "loading");
-    const projectValidation = await validateProject(jiraUrl.origin, projectKey);
+    const projectValidation = await validateProject(jiraOrigin, projectKey);
 
     if (!projectValidation.success) {
       setStatus(projectValidation.message, "error");
 
       if (projectValidation.loginRequired) {
-        redirectToLogin(jiraUrl.origin);
+        redirectToLogin(jiraOrigin);
       }
 
       return;
     }
 
-    const cleanTitle = pageData.title?.replace(/^OCTANE \|\s*$/, "").trim();
-    const finalSummary = cleanTitle ? pageData.title : "Imported QA Ticket";
+    const finalSummary = pageData.title || "Imported QA Ticket";
 
     setStatus("Checking for an existing ticket...", "loading");
 
     const existing = await findExistingJiraIssue(
-      jiraUrl.origin,
+      jiraOrigin,
       projectKey,
       finalSummary,
     );
 
-    if (existing.error) {
-      // duplicate check itself failed — don't block creation over it, just proceed
-    } else if (existing.issue) {
-      const issueUrl = `${jiraUrl.origin}/browse/${existing.issue.key}`;
+    if (existing.issue) {
+      const issueUrl = `${jiraOrigin}/browse/${existing.issue.key}`;
       setStatus(`Ticket already exists: ${existing.issue.key}`, "success");
       renderTicketCard(existing.issue.key, issueUrl);
       saveProjectHistory(projectKey);
@@ -883,13 +864,8 @@ async function createTicket() {
             },
           ],
         },
-
-        // Add a separator paragraph (optional)
-        {
-          type: "paragraph",
-          content: [],
-        },
-
+        // Add a separator paragraph
+        { type: "paragraph", content: [] },
         // Append the converted rich HTML
         ...bodyAdf.content,
       ],
@@ -898,7 +874,7 @@ async function createTicket() {
     setStatus("Creating Jira ticket...", "loading");
 
     const issue = await createJiraIssue(
-      jiraUrl.origin,
+      jiraOrigin,
       projectKey,
       finalSummary,
       issueDescription,
@@ -914,7 +890,7 @@ async function createTicket() {
           const blob = dataUrlToBlob(img.dataUrl);
           const ext = (blob.type.split("/")[1] || "png").split("+")[0];
           const attachment = await uploadJiraAttachment(
-            jiraUrl.origin,
+            jiraOrigin,
             issue.key,
             blob,
             `${img.placeholder}.${ext}`,
@@ -928,13 +904,13 @@ async function createTicket() {
       setStatus("Attaching images to ticket...", "loading");
 
       await updateJiraIssueDescription(
-        jiraUrl.origin,
+        jiraOrigin,
         issue.key,
         insertUploadedImages(issueDescription.content, byPlaceholder),
       );
     }
 
-    const issueUrl = `${jiraUrl.origin}/browse/${issue.key}`;
+    const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
     setStatus(`Created ${issue.key}.`, "success");
     renderTicketCard(issue.key, issueUrl);
     saveProjectHistory(projectKey);
@@ -952,9 +928,13 @@ async function getPageData() {
   const results = await chrome.scripting.executeScript({
     target: { tabId: currentTab.id },
     func: async () => {
-      const octaneID = document.querySelector(
-        ".entity-form-document-view-header-entity-id-container",
-      )?.textContent;
+      const octaneID = String(
+        document.querySelector(
+          ".entity-form-document-view-header-entity-id-container",
+        )?.textContent ?? "",
+      )
+        .replace(/\s+/g, " ")
+        .trim();
       const title =
         document
           .querySelector(".entity-form-document-view-header-name-field-container")
@@ -965,7 +945,9 @@ async function getPageData() {
         )?.value ||
         "";
 
-      const jiraTitle = `OCTANE | ${octaneID} | ${title}`;
+      const jiraTitle = ["OCTANE", octaneID, title]
+        .filter(Boolean)
+        .join(" | ");
 
       const editor = document.querySelector(".fr-element");
       const images = [];
@@ -1008,7 +990,7 @@ async function getPageData() {
 
       return {
         title: jiraTitle,
-        octaneID: String(octaneID ?? "").trim(),
+        octaneID,
         url: location.href,
         html,
         images,
@@ -1212,14 +1194,8 @@ function redirectToLogin(jiraBaseUrl) {
   };
 }
 
-function getCurrentTab() {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (!tabs.length) {
-        reject(new Error("No active tab found."));
-        return;
-      }
-      resolve(tabs[0]);
-    });
-  });
+async function getCurrentTab() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tabs.length) throw new Error("No active tab found.");
+  return tabs[0];
 }
