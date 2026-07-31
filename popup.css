@@ -255,6 +255,10 @@ body {
   margin-bottom: 16px;
 }
 
+.button-group:last-child {
+  margin-bottom: 0;
+}
+
 button {
   flex: 1;
   display: flex;
@@ -309,6 +313,11 @@ button:disabled {
   border-color: var(--border);
   color: var(--text-secondary);
   box-shadow: var(--shadow-xs);
+}
+
+#bulkLoginBtn,
+#exportBtn {
+  width: 100%;
 }
 
 .btn-ghost:hover {

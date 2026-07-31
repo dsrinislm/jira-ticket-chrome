@@ -2,6 +2,8 @@ const statusDiv = document.getElementById("status");
 const statusText = document.getElementById("statusText");
 const ticketResult = document.getElementById("ticketResult");
 const loginBtn = document.getElementById("openWebsite");
+const bulkLoginBtn = document.getElementById("bulkLoginBtn");
+const exportBtn = document.getElementById("exportBtn");
 const jiraBaseUrlInput = document.getElementById("jiraBaseUrl");
 const jiraBaseUrlError = document.getElementById("jiraBaseUrlError");
 const projectKeyInput = document.getElementById("projectKey");
@@ -28,6 +30,8 @@ const progressPercent = document.getElementById("progressPercent");
 const progressBar = document.getElementById("progressBar");
 
 let bulkRows = [];
+let importWorkbook = null;
+let importColIdx = null;
 
 const debouncedSaveSettings = debounce(saveSettings, 300);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -49,6 +53,7 @@ tabBulk.addEventListener("click", () => switchView("bulk"));
 selectAllCheckbox.addEventListener("change", toggleSelectAll);
 fileInput.addEventListener("change", handleFileSelected);
 importBtn.addEventListener("click", runBulkImport);
+exportBtn.addEventListener("click", downloadPreviewReport);
 
 jiraBaseUrlInput.addEventListener("input", () => {
   // Never introduce a new error while typing — only clear one that's
@@ -60,6 +65,15 @@ jiraBaseUrlInput.addEventListener("input", () => {
 
 jiraBaseUrlInput.addEventListener("blur", validateJiraBaseUrlField);
 projectKeyInput.addEventListener("input", debouncedSaveSettings);
+
+[jiraBaseUrlInput, projectKeyInput].forEach((input) =>
+  input.addEventListener("input", () => {
+    if (!bulkView.hidden) {
+      updateBulkStatusMessage();
+      debouncedValidateBulkProjectKey();
+    }
+  }),
+);
 createTicketBtn.addEventListener("click", createTicket);
 
 function switchView(view) {
@@ -73,9 +87,19 @@ function switchView(view) {
   tabBulk.classList.toggle("active", isBulk);
   tabBulk.setAttribute("aria-selected", String(isBulk));
 
+  if (isBulk) {
+    updateBulkStatusMessage();
+  } else {
+    setStatus("Configure Jira details and create a ticket.", "info");
+  }
+}
+
+function updateBulkStatusMessage() {
+  const jiraConfigured =
+    jiraBaseUrlInput.value.trim() && projectKeyInput.value.trim();
   setStatus(
-    isBulk
-      ? "Select the file to import."
+    jiraConfigured
+      ? "Upload octane report"
       : "Configure Jira details and create a ticket.",
     "info",
   );
@@ -143,12 +167,12 @@ function buildIssueDescription(sourceUrl, description) {
 }
 
 // Reads rows from the first worksheet as
-// { name, description, sourceUrl, idText }. Columns are matched by header
-// (case-insensitive, substring-tolerant) so variations like "Name", "ID",
-// "Id", "Description" all work. For the ID column we keep both the display
-// text (what the cell shows) and the hyperlink URL, since linked cells
-// store the real address in cell.l.Target while SheetJS surfaces only the
-// display text via cell.w / cell.v.
+// { name, description, sourceUrl, idText, rowIndex }. Columns are matched by
+// header (case-insensitive, substring-tolerant) so variations like "Name",
+// "ID", "Id", "Description" all work. For the ID column we keep both the
+// display text (what the cell shows) and the hyperlink URL, since linked
+// cells store the real address in cell.l.Target while SheetJS surfaces only
+// the display text via cell.w / cell.v.
 function parseSheetRows(sheet) {
   const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
   if (!aoa.length) return [];
@@ -164,6 +188,8 @@ function parseSheetRows(sheet) {
   const descIdx = findCol("description");
   const idIdx = findCol("id");
 
+  importColIdx = { id: idIdx, name: nameIdx, description: descIdx };
+
   const parsed = [];
   for (let r = 1; r < aoa.length; r++) {
     const name = String(aoa[r][nameIdx] ?? "").trim();
@@ -171,6 +197,7 @@ function parseSheetRows(sheet) {
 
     const idCell = readCell(sheet, r, idIdx);
     parsed.push({
+      rowIndex: r,
       name,
       description: String(aoa[r][descIdx] ?? "").trim(),
       sourceUrl: idCell.url,
@@ -196,6 +223,7 @@ function handleFileSelected() {
   fileError.style.display = "none";
   previewSection.style.display = "none";
   progressSection.style.display = "none";
+  exportBtn.style.display = "none";
   bulkRows = [];
 
   if (!file) return;
@@ -207,7 +235,11 @@ function handleFileSelected() {
   const reader = new FileReader();
   reader.onload = (e) => {
     try {
-      const workbook = XLSX.read(e.target.result, { type: "array" });
+      const workbook = XLSX.read(e.target.result, {
+        type: "array",
+        cellStyles: true,
+      });
+      importWorkbook = workbook;
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
       const parsed = parseSheetRows(sheet);
 
@@ -223,6 +255,7 @@ function handleFileSelected() {
       dropzoneHint.textContent = "Click to choose a different file";
       fileSummary.textContent = `${parsed.length} row(s) loaded.`;
       setStatus("Select the tickets to import.", "info");
+      validateBulkProjectKey();
     } catch (err) {
       resetDropzone();
       fileError.textContent = `Couldn't read that file: ${err.message}`;
@@ -298,7 +331,9 @@ function loadBulkRows(parsed) {
     fragment.appendChild(tr);
 
     bulkRows.push({
+      rowIndex: record.rowIndex,
       title,
+      name: record.name,
       description: record.description,
       sourceUrl: record.sourceUrl,
       idText: record.idText,
@@ -385,6 +420,26 @@ function renderTicketCard(issueKey, issueUrl) {
   });
 }
 
+async function validateBulkProjectKey() {
+  const url = jiraBaseUrlInput.value.trim();
+  const projectKey = projectKeyInput.value.trim().toUpperCase();
+  if (!url || !projectKey) return;
+
+  let origin;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    return;
+  }
+
+  const result = await validateProject(origin, projectKey);
+  if (!result.success && !result.loginRequired) {
+    setStatus(result.message, "error");
+  }
+}
+
+const debouncedValidateBulkProjectKey = debounce(validateBulkProjectKey, 400);
+
 async function runBulkImport() {
   const ctx = getJiraContext();
   if (!ctx) return;
@@ -398,6 +453,8 @@ async function runBulkImport() {
   const { jiraOrigin, projectKey } = ctx;
   saveSettings();
 
+  hideLoginButtons();
+  exportBtn.style.display = "none";
   setBulkBusy(true);
 
   try {
@@ -407,6 +464,7 @@ async function runBulkImport() {
         "Jira login required. Open Jira in a tab, log in, then retry.",
         "error",
       );
+      showLoginButton(`${jiraOrigin}/browse/${projectKey}`);
       return;
     }
 
@@ -414,6 +472,9 @@ async function runBulkImport() {
     const projectValidation = await validateProject(jiraOrigin, projectKey);
     if (!projectValidation.success) {
       setStatus(projectValidation.message, "error");
+      if (projectValidation.loginRequired) {
+        showLoginButton(`${jiraOrigin}/browse/${projectKey}`);
+      }
       return;
     }
 
@@ -474,6 +535,9 @@ async function runBulkImport() {
 
     updateProgress(selectedRows.length, selectedRows.length, "Import complete");
 
+    if (created > 0 || skipped > 0) saveProjectHistory(projectKey);
+    exportBtn.style.display = "block";
+
     setStatus(
       `Done. ${created} created, ${skipped} already existed, ${failed} failed.`,
       failed ? "error" : "success",
@@ -491,6 +555,55 @@ function updateProgress(completed, total, label) {
   progressPercent.textContent = `${pct}%`;
   progressSection.setAttribute("aria-valuenow", String(pct));
   progressLabel.textContent = label || `Importing ${completed} of ${total}…`;
+}
+
+function downloadPreviewReport() {
+  if (!importWorkbook) return;
+
+  // Clone the original workbook so the report is the imported file plus the
+  // Status column — every original cell, style, width and hyperlink is kept
+  // exactly as-is. structuredClone preserves Date cell values.
+  const workbook = structuredClone(importWorkbook);
+  const sheetName = workbook.SheetNames[0];
+  const sheet = workbook.Sheets[sheetName];
+
+  const range = XLSX.utils.decode_range(sheet["!ref"]);
+  const statusCol = range.e.c + 1;
+  const idCol = importColIdx?.id ?? 0;
+
+  const encode = (r, c) => XLSX.utils.encode_cell({ r, c });
+
+  const statusHeader = encode(0, statusCol);
+  sheet[statusHeader] = { t: "s", v: "Status" };
+  const idHeaderStyle = sheet[encode(0, idCol)]?.s;
+  if (idHeaderStyle != null) sheet[statusHeader].s = idHeaderStyle;
+
+  bulkRows.forEach((r) => {
+    const address = encode(r.rowIndex, statusCol);
+    const statusLink = r.statusEl.querySelector("a");
+
+    if (statusLink) {
+      const key = statusLink.textContent.trim();
+      const ticketUrl = statusLink.getAttribute("href");
+      sheet[address] = { t: "s", v: key, l: { Target: ticketUrl } };
+      const idCellStyle = sheet[encode(r.rowIndex, idCol)]?.s;
+      if (idCellStyle != null) sheet[address].s = idCellStyle;
+    } else {
+      const statusText = r.statusEl.textContent.trim().replace(/\s+/g, " ");
+      if (statusText) sheet[address] = { t: "s", v: statusText };
+    }
+  });
+
+  sheet["!cols"] = [...(sheet["!cols"] || []), { wch: 18 }];
+  sheet["!ref"] = XLSX.utils.encode_range({
+    s: range.s,
+    e: { r: range.e.r, c: statusCol },
+  });
+
+  workbook.SheetNames = [sheetName];
+  workbook.Sheets = { [sheetName]: sheet };
+
+  XLSX.writeFile(workbook, "octane-jira-report.xlsx");
 }
 const HTML_ESCAPES = {
   "&": "&amp;",
@@ -736,7 +849,7 @@ function renderProjectHistory(projects) {
       <span class="tag-close" title="Remove">✕</span>
     `;
 
-    tag.querySelector(".tag-text").addEventListener("click", () => {
+    tag.addEventListener("click", () => {
       projectKeyInput.value = project;
       saveSettings();
     });
@@ -769,7 +882,7 @@ async function createTicket() {
   try {
     saveSettings();
 
-    loginBtn.style.display = "none";
+    hideLoginButtons();
     ticketResult.innerHTML = "";
 
     const { jiraOrigin, projectKey } = getJiraContext() || {};
@@ -796,7 +909,7 @@ async function createTicket() {
     const loggedIn = await isJiraLoggedIn(jiraOrigin);
 
     if (!loggedIn) {
-      redirectToLogin(jiraOrigin);
+      redirectToLogin(jiraOrigin, projectKey);
       return;
     }
 
@@ -807,7 +920,7 @@ async function createTicket() {
       setStatus(projectValidation.message, "error");
 
       if (projectValidation.loginRequired) {
-        redirectToLogin(jiraOrigin);
+        redirectToLogin(jiraOrigin, projectKey);
       }
 
       return;
@@ -1123,6 +1236,16 @@ async function validateProject(jiraBaseUrl, projectKey) {
     }
 
     if (response.status === 401 || response.status === 403) {
+      const sessionValid = await isJiraLoggedIn(jiraBaseUrl);
+
+      if (sessionValid) {
+        return {
+          success: false,
+          loginRequired: false,
+          message: "Invalid project key or you don't have access.",
+        };
+      }
+
       return {
         success: false,
         loginRequired: true,
@@ -1167,7 +1290,13 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
   });
 
   if (response.status === 401 || response.status === 403) {
-    redirectToLogin(jiraBaseUrl);
+    const sessionValid = await isJiraLoggedIn(jiraBaseUrl);
+
+    if (sessionValid) {
+      throw new Error("Invalid project key or you don't have access.");
+    }
+
+    redirectToLogin(jiraBaseUrl, projectKey);
     throw new Error("Jira session expired. Please login again.");
   }
 
@@ -1185,13 +1314,24 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
   return responseData;
 }
 
-function redirectToLogin(jiraBaseUrl) {
-  setStatus("Jira login required.", "error");
-  loginBtn.style.display = "block";
-
-  loginBtn.onclick = () => {
-    chrome.tabs.create({ url: jiraBaseUrl });
+function showLoginButton(url) {
+  const btn = bulkView.hidden ? loginBtn : bulkLoginBtn;
+  btn.style.display = "block";
+  btn.onclick = () => {
+    chrome.tabs.create({ url });
   };
+}
+
+function hideLoginButtons() {
+  loginBtn.style.display = "none";
+  bulkLoginBtn.style.display = "none";
+}
+
+function redirectToLogin(jiraBaseUrl, projectKey) {
+  setStatus("Jira login required.", "error");
+  showLoginButton(
+    projectKey ? `${jiraBaseUrl}/browse/${projectKey}` : jiraBaseUrl,
+  );
 }
 
 async function getCurrentTab() {

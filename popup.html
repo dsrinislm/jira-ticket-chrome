@@ -118,9 +118,21 @@
         </div>
       </div>
 
-      <button id="importBtn" type="button" class="btn-primary">
-        <span class="btn-spinner" aria-hidden="true"></span>
-        <span class="btn-label">Create selected tickets</span>
+      <div class="button-group">
+        <button id="importBtn" type="button" class="btn-primary">
+          <span class="btn-spinner" aria-hidden="true"></span>
+          <span class="btn-label">Create selected tickets</span>
+        </button>
+      </div>
+
+      <button id="bulkLoginBtn" class="btn-ghost" type="button" style="display: none;">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Log in to Jira
+      </button>
+
+      <button id="exportBtn" class="btn-ghost" type="button" style="display: none;">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Download report
       </button>
     </section>
   </div>
