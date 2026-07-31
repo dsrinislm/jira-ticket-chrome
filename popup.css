@@ -174,6 +174,25 @@ body {
   box-shadow: 0 0 0 4px var(--accent-50);
 }
 
+#jiraBaseUrl.invalid {
+  border-color: var(--danger);
+  background: var(--danger-50);
+}
+
+#jiraBaseUrl.invalid:focus,
+#jiraBaseUrl.invalid:focus-visible {
+  box-shadow: 0 0 0 4px rgba(229, 72, 77, 0.16);
+}
+
+.field-error {
+  margin-top: -8px;
+  margin-bottom: 12px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--danger);
+  line-height: 1.4;
+}
+
 /* Recent Project Tags */
 
 .project-tags {
