@@ -115,6 +115,89 @@ function textToADF(text) {
   return { version: 1, type: "doc", content };
 }
 
+// ADF for bulk rows: the same SOURCE TICKET URL header the single-ticket
+// flow adds, built from the Excel "ID" column, followed by the
+// Description column as plain-text paragraphs. No ID -> description only.
+function buildIssueDescription(sourceUrl, description) {
+  const bodyAdf = textToADF(description);
+
+  const sourceBlock = sourceUrl
+    ? [
+        {
+          type: "heading",
+          attrs: { level: 3 },
+          content: [{ type: "text", text: "SOURCE TICKET URL" }],
+        },
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "text",
+              text: sourceUrl,
+              marks: [{ type: "link", attrs: { href: sourceUrl } }],
+            },
+          ],
+        },
+        { type: "paragraph", content: [] },
+      ]
+    : [];
+
+  return {
+    version: 1,
+    type: "doc",
+    content: [...sourceBlock, ...bodyAdf.content],
+  };
+}
+
+// Reads rows from the first worksheet as
+// { name, description, sourceUrl, idText }. Columns are matched by header
+// (case-insensitive, substring-tolerant) so variations like "Name", "ID",
+// "Id", "Description" all work. For the ID column we keep both the display
+// text (what the cell shows) and the hyperlink URL, since linked cells
+// store the real address in cell.l.Target while SheetJS surfaces only the
+// display text via cell.w / cell.v.
+function parseSheetRows(sheet) {
+  const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  if (!aoa.length) return [];
+
+  const headers = aoa[0].map((h) => String(h).trim().toLowerCase());
+  const findCol = (needle) => {
+    const exact = headers.indexOf(needle);
+    if (exact !== -1) return exact;
+    return headers.findIndex((h) => h.includes(needle));
+  };
+
+  const nameIdx = findCol("name");
+  const descIdx = findCol("description");
+  const idIdx = findCol("id");
+
+  const parsed = [];
+  for (let r = 1; r < aoa.length; r++) {
+    const name = String(aoa[r][nameIdx] ?? "").trim();
+    if (!name) continue;
+
+    const idCell = readCell(sheet, r, idIdx);
+    parsed.push({
+      name,
+      description: String(aoa[r][descIdx] ?? "").trim(),
+      sourceUrl: idCell.url,
+      idText: idCell.text,
+    });
+  }
+  return parsed;
+}
+
+// Reads a cell's display text plus its hyperlink target. The URL falls
+// back to the display text when the cell isn't linked.
+function readCell(sheet, row, colIdx) {
+  if (colIdx < 0) return { text: "", url: "" };
+  const cell = sheet[XLSX.utils.encode_cell({ r: row, c: colIdx })];
+  if (!cell) return { text: "", url: "" };
+  const text = String(cell.w ?? cell.v ?? "").trim();
+  const url = String(cell.l?.Target ?? "").trim();
+  return { text, url: url || text };
+}
+
 function handleFileSelected() {
   const file = fileInput.files[0];
   fileError.style.display = "none";
@@ -133,14 +216,7 @@ function handleFileSelected() {
     try {
       const workbook = XLSX.read(e.target.result, { type: "array" });
       const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
-
-      const parsed = json
-        .map((record) => ({
-          name: String(record["Name"] ?? "").trim(),
-          description: String(record["Description"] ?? "").trim(),
-        }))
-        .filter((r) => r.name);
+      const parsed = parseSheetRows(sheet);
 
       if (!parsed.length) {
         resetDropzone();
@@ -171,8 +247,7 @@ function handleFileSelected() {
 function resetDropzone() {
   dropzone.dataset.loaded = "false";
   dropzoneTitle.textContent = "Choose an Excel file";
-  dropzoneHint.textContent =
-    '.xlsx or .xls · a "Name" column is required';
+  dropzoneHint.textContent = '.xlsx or .xls · a "Name" column is required';
 }
 
 function loadBulkRows(parsed) {
@@ -182,7 +257,8 @@ function loadBulkRows(parsed) {
   const fragment = document.createDocumentFragment();
 
   parsed.forEach((record) => {
-    const title = `OCTANE | ${record.name}`;
+    const titleParts = ["OCTANE", record.idText, record.name].filter(Boolean);
+    const title = titleParts.join(" | ");
     const tr = document.createElement("tr");
 
     const checkTd = document.createElement("td");
@@ -191,6 +267,23 @@ function loadBulkRows(parsed) {
     checkbox.checked = true;
     checkbox.addEventListener("change", updateSelectionCount);
     checkTd.appendChild(checkbox);
+
+    const idTd = document.createElement("td");
+    idTd.className = "row-id";
+    if (record.sourceUrl) {
+      const link = document.createElement("a");
+      link.href = record.sourceUrl;
+      link.title = record.sourceUrl;
+      link.textContent = record.idText || record.sourceUrl;
+      link.rel = "noopener noreferrer";
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        chrome.tabs.create({ url: record.sourceUrl });
+      });
+      idTd.appendChild(link);
+    } else {
+      idTd.textContent = "—";
+    }
 
     const titleTd = document.createElement("td");
     const titleSpan = document.createElement("span");
@@ -208,12 +301,14 @@ function loadBulkRows(parsed) {
     statusTd.dataset.state = "pending";
     statusTd.textContent = "Not started";
 
-    tr.append(checkTd, titleTd, descTd, statusTd);
+    tr.append(checkTd, idTd, titleTd, descTd, statusTd);
     fragment.appendChild(tr);
 
     bulkRows.push({
       title,
       description: record.description,
+      sourceUrl: record.sourceUrl,
+      idText: record.idText,
       checkbox,
       statusEl: statusTd,
     });
@@ -374,7 +469,7 @@ async function runBulkImport() {
             jiraOrigin,
             projectKey,
             row.title,
-            textToADF(row.description),
+            buildIssueDescription(row.sourceUrl, row.description),
           );
           const url = `${jiraOrigin}/browse/${issue.key}`;
           setRowStatus(
@@ -405,7 +500,8 @@ async function runBulkImport() {
 }
 
 function updateProgress(completed, total, label) {
-  const pct = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+  const pct =
+    total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
   progressBar.style.width = `${pct}%`;
   progressBar.dataset.done = String(completed >= total && total > 0);
   progressPercent.textContent = `${pct}%`;
@@ -417,18 +513,16 @@ function updateProgress(completed, total, label) {
 // ticket key/url come back from the Jira API response — none of that
 // should be trusted enough to inject as raw markup.
 function escapeHtml(value) {
-  return String(value ?? "").replace(
-    /[&<>"']/g,
-    (c) =>
-      c === "&"
-        ? "&amp;"
-        : c === "<"
-          ? "&lt;"
-          : c === ">"
-            ? "&gt;"
-            : c === '"'
-              ? "&quot;"
-              : "&#39;",
+  return String(value ?? "").replace(/[&<>"']/g, (c) =>
+    c === "&"
+      ? "&amp;"
+      : c === "<"
+        ? "&lt;"
+        : c === ">"
+          ? "&gt;"
+          : c === '"'
+            ? "&quot;"
+            : "&#39;",
   );
 }
 
@@ -694,7 +788,25 @@ async function createTicket() {
     const jiraUrl = new URL(jiraBaseUrl);
 
     setStatus("Reading active QA ticket...", "loading");
-    const pageData = await getPageData();
+
+    let pageData;
+    try {
+      pageData = await getPageData();
+    } catch {
+      setStatus(
+        "Open the Octane ticket details page and try again.",
+        "error",
+      );
+      return;
+    }
+
+    if (!pageData.octaneID) {
+      setStatus(
+        "Open the Octane ticket details page and try again.",
+        "error",
+      );
+      return;
+    }
 
     setStatus("Checking Jira session...", "loading");
     const loggedIn = await isJiraLoggedIn(jiraUrl.origin);
@@ -840,16 +952,20 @@ async function getPageData() {
   const results = await chrome.scripting.executeScript({
     target: { tabId: currentTab.id },
     func: async () => {
+      const octaneID = document.querySelector(
+        ".entity-form-document-view-header-entity-id-container",
+      )?.textContent;
       const title =
+        document
+          .querySelector(".entity-form-document-view-header-name-field-container")
+          ?.textContent.replace(/\s+/g, " ")
+          .trim() ||
         document.querySelector(
-          ".document-view-header-entity-name--custom-label",
-        )?.textContent || "";
+          ".document-view-header-entity-name--custom-label input",
+        )?.value ||
+        "";
 
-      const jiraTitle = `OCTANE | ${title
-        .replace(/[\r\n\t]+/g, "")
-        .replace(/\s*\|\s*/g, " | ")
-        .replace(/\s+/g, " ")
-        .trim()}`;
+      const jiraTitle = `OCTANE | ${octaneID} | ${title}`;
 
       const editor = document.querySelector(".fr-element");
       const images = [];
@@ -890,7 +1006,13 @@ async function getPageData() {
         html = container.innerHTML;
       }
 
-      return { title: jiraTitle, url: location.href, html, images };
+      return {
+        title: jiraTitle,
+        octaneID: String(octaneID ?? "").trim(),
+        url: location.href,
+        html,
+        images,
+      };
     },
   });
 
@@ -1045,7 +1167,7 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
     fields: {
       project: { key: projectKey },
       summary,
-      issuetype: { name: "Task" },
+      issuetype: { name: "Bug" },
       description,
     },
   };
