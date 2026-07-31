@@ -30,8 +30,7 @@ const progressPercent = document.getElementById("progressPercent");
 const progressBar = document.getElementById("progressBar");
 
 let bulkRows = [];
-let importWorkbook = null;
-let importColIdx = null;
+let importData = null;
 
 const debouncedSaveSettings = debounce(saveSettings, 300);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -171,13 +170,14 @@ function buildIssueDescription(sourceUrl, description) {
 // header (case-insensitive, substring-tolerant) so variations like "Name",
 // "ID", "Id", "Description" all work. For the ID column we keep both the
 // display text (what the cell shows) and the hyperlink URL, since linked
-// cells store the real address in cell.l.Target while SheetJS surfaces only
-// the display text via cell.w / cell.v.
-function parseSheetRows(sheet) {
-  const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-  if (!aoa.length) return [];
+// cells store the real address in cell.hyperlink while the cell.text holds
+// the displayed value.
+function parseSheetRows(worksheet) {
+  const headers = [];
+  worksheet.getRow(1).eachCell({ includeEmpty: true }, (cell, colNumber) => {
+    headers[colNumber - 1] = String(cell.text).trim().toLowerCase();
+  });
 
-  const headers = aoa[0].map((h) => String(h).trim().toLowerCase());
   const findCol = (needle) => {
     const exact = headers.indexOf(needle);
     if (exact !== -1) return exact;
@@ -185,21 +185,24 @@ function parseSheetRows(sheet) {
   };
 
   const nameIdx = findCol("name");
+  if (nameIdx < 0) return [];
+
   const descIdx = findCol("description");
   const idIdx = findCol("id");
 
-  importColIdx = { id: idIdx, name: nameIdx, description: descIdx };
-
   const parsed = [];
-  for (let r = 1; r < aoa.length; r++) {
-    const name = String(aoa[r][nameIdx] ?? "").trim();
+  for (let r = 2; r <= worksheet.actualRowCount; r++) {
+    const name = String(worksheet.getCell(r, nameIdx + 1).text ?? "").trim();
     if (!name) continue;
 
-    const idCell = readCell(sheet, r, idIdx);
+    const idCell = readCell(worksheet, r, idIdx);
     parsed.push({
-      rowIndex: r,
+      rowIndex: r - 1,
       name,
-      description: String(aoa[r][descIdx] ?? "").trim(),
+      description:
+        descIdx < 0
+          ? ""
+          : String(worksheet.getCell(r, descIdx + 1).text ?? "").trim(),
       sourceUrl: idCell.url,
       idText: idCell.text,
     });
@@ -209,12 +212,11 @@ function parseSheetRows(sheet) {
 
 // Reads a cell's display text plus its hyperlink target. The URL falls
 // back to the display text when the cell isn't linked.
-function readCell(sheet, row, colIdx) {
+function readCell(worksheet, row, colIdx) {
   if (colIdx < 0) return { text: "", url: "" };
-  const cell = sheet[XLSX.utils.encode_cell({ r: row, c: colIdx })];
-  if (!cell) return { text: "", url: "" };
-  const text = String(cell.w ?? cell.v ?? "").trim();
-  const url = String(cell.l?.Target ?? "").trim();
+  const cell = worksheet.getCell(row, colIdx + 1);
+  const text = String(cell.text ?? "").trim();
+  const url = String(cell.hyperlink ?? "").trim();
   return { text, url: url || text };
 }
 
@@ -233,14 +235,12 @@ function handleFileSelected() {
   dropzoneHint.textContent = "Reading file…";
 
   const reader = new FileReader();
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     try {
-      const workbook = XLSX.read(e.target.result, {
-        type: "array",
-        cellStyles: true,
-      });
-      importWorkbook = workbook;
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(e.target.result);
+      importData = e.target.result;
+      const sheet = workbook.worksheets[0];
       const parsed = parseSheetRows(sheet);
 
       if (!parsed.length) {
@@ -557,54 +557,98 @@ function updateProgress(completed, total, label) {
   progressLabel.textContent = label || `Importing ${completed} of ${total}…`;
 }
 
-function downloadPreviewReport() {
-  if (!importWorkbook) return;
 
-  // Clone the original workbook so the report is the imported file plus the
-  // Status column — every original cell, style, width and hyperlink is kept
-  // exactly as-is. structuredClone preserves Date cell values.
-  const workbook = structuredClone(importWorkbook);
-  const sheetName = workbook.SheetNames[0];
-  const sheet = workbook.Sheets[sheetName];
+async function downloadPreviewReport() {
+  if (!importData) return;
 
-  const range = XLSX.utils.decode_range(sheet["!ref"]);
-  const statusCol = range.e.c + 1;
-  const idCol = importColIdx?.id ?? 0;
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(importData);
+    const sheet = workbook.worksheets[0];
 
-  const encode = (r, c) => XLSX.utils.encode_cell({ r, c });
-
-  const statusHeader = encode(0, statusCol);
-  sheet[statusHeader] = { t: "s", v: "Status" };
-  const idHeaderStyle = sheet[encode(0, idCol)]?.s;
-  if (idHeaderStyle != null) sheet[statusHeader].s = idHeaderStyle;
-
-  bulkRows.forEach((r) => {
-    const address = encode(r.rowIndex, statusCol);
-    const statusLink = r.statusEl.querySelector("a");
-
-    if (statusLink) {
-      const key = statusLink.textContent.trim();
-      const ticketUrl = statusLink.getAttribute("href");
-      sheet[address] = { t: "s", v: key, l: { Target: ticketUrl } };
-      const idCellStyle = sheet[encode(r.rowIndex, idCol)]?.s;
-      if (idCellStyle != null) sheet[address].s = idCellStyle;
-    } else {
-      const statusText = r.statusEl.textContent.trim().replace(/\s+/g, " ");
-      if (statusText) sheet[address] = { t: "s", v: statusText };
+    for (const name of Object.keys(sheet.tables || {})) {
+      sheet.removeTable(name);
     }
-  });
 
-  sheet["!cols"] = [...(sheet["!cols"] || []), { wch: 18 }];
-  sheet["!ref"] = XLSX.utils.encode_range({
-    s: range.s,
-    e: { r: range.e.r, c: statusCol },
-  });
+    sheet.spliceColumns(1, 0, []);
+    sheet.getColumn(1).width = 18;
 
-  workbook.SheetNames = [sheetName];
-  workbook.Sheets = { [sheetName]: sheet };
+    const headerFont = {
+      name: "Arial",
+      size: 11,
+      bold: true,
+      color: { argb: "FFFFFFFF" },
+    };
+    const headerFill = {
+      type: "pattern",
+      pattern: "solid",
+      fgColor: { argb: "FF0097EF" },
+    };
+    const linkFont = {
+      name: "Calibri",
+      size: 11,
+      underline: "single",
+      color: { argb: "FF0000FF" },
+    };
 
-  XLSX.writeFile(workbook, "octane-jira-report.xlsx");
+    const lastCol = sheet.columnCount;
+
+    for (let c = 1; c <= lastCol; c++) {
+      const cell = sheet.getCell(1, c);
+      cell.font = headerFont;
+      cell.fill = headerFill;
+    }
+
+    sheet.getCell("A1").value = "Status";
+
+    bulkRows.forEach((r) => {
+      const row = r.rowIndex + 1;
+      const cell = sheet.getCell(row, 1);
+      const statusLink = r.statusEl.querySelector("a");
+      if (statusLink) {
+        cell.value = {
+          text: statusLink.textContent.trim(),
+          hyperlink: statusLink.getAttribute("href"),
+        };
+        cell.font = linkFont;
+      } else {
+        const statusText = r.statusEl.textContent.trim().replace(/\s+/g, " ");
+        if (statusText) cell.value = statusText;
+      }
+    });
+
+    for (let r = 1; r <= sheet.actualRowCount; r++) {
+      for (let c = 1; c <= lastCol; c++) {
+        const cell = sheet.getCell(r, c);
+        if (cell.hyperlink) cell.font = linkFont;
+      }
+    }
+
+    downloadBlob("octane-jira-report.xlsx", await workbook.xlsx.writeBuffer());
+  } catch (err) {
+    console.error("ExcelJS export failed:", err);
+    setStatus("Couldn't download the report.", "error");
+  }
 }
+
+function downloadBlob(filename, data) {
+  const blob =
+    data instanceof Blob
+      ? data
+      : new Blob([data], {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+
 const HTML_ESCAPES = {
   "&": "&amp;",
   "<": "&lt;",
