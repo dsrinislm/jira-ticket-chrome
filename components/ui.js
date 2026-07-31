@@ -38,6 +38,7 @@ export const progressBar = el("progressBar");
 export const state = {
   bulkRows: [],
   importData: null,
+  importExt: null,
 };
 
 const HTML_ESCAPES = {
@@ -107,7 +108,7 @@ export function updateBulkStatusMessage() {
 export function resetDropzone() {
   dropzone.dataset.loaded = "false";
   dropzoneTitle.textContent = "Choose an Excel file";
-  dropzoneHint.textContent = '.xlsx · a "Name" column is required';
+  dropzoneHint.textContent = 'Excel files · "ID", "Name" and "Description" columns required';
 }
 
 export function updateSelectionCount() {

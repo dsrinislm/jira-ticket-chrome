@@ -136,9 +136,19 @@ async function runBulkImport() {
     progressSection.style.display = "block";
     updateProgress(0, selectedRows.length, "Starting import…");
 
-    for (let i = 0; i < selectedRows.length; i++) {
-      const row = selectedRows[i];
-      setStatus(`Processing ${i + 1} of ${selectedRows.length}...`, "loading");
+    // Process rows concurrently with a bounded pool — sequential imports
+    // take ~2 API calls + 250ms per row, so N rows cost ~2N serial round
+    // trips. A small pool keeps the per-worker pacing (and Jira's rate
+    // limits) intact while cutting wall time by ~the pool size.
+    const MAX_CONCURRENT = 4;
+    let nextRow = 0;
+    let completed = 0;
+
+    const processRow = async (row) => {
+      setStatus(
+        `Processing ${completed + 1} of ${selectedRows.length}...`,
+        "loading",
+      );
       setRowStatus(row, "checking", "Checking…");
 
       try {
@@ -180,9 +190,23 @@ async function runBulkImport() {
         failed++;
       }
 
+      completed++;
+      updateProgress(completed, selectedRows.length);
       await sleep(250);
-      updateProgress(i + 1, selectedRows.length);
-    }
+    };
+
+    const worker = async () => {
+      while (nextRow < selectedRows.length) {
+        await processRow(selectedRows[nextRow++]);
+      }
+    };
+
+    await Promise.all(
+      Array.from(
+        { length: Math.min(MAX_CONCURRENT, selectedRows.length) },
+        worker,
+      ),
+    );
 
     updateProgress(selectedRows.length, selectedRows.length, "Import complete");
 

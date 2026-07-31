@@ -40,7 +40,7 @@
 
   <div class="tabs" role="tablist">
     <button id="tabSingle" class="tab-btn active" type="button" role="tab" aria-selected="true" data-view="single">
-      Import Curent Octane
+      Import Octane Ticket
     </button>
     <button id="tabBulk" class="tab-btn" type="button" role="tab" aria-selected="false" data-view="bulk">
       Bulk Import
@@ -70,14 +70,14 @@
     <section class="field-block">
       <label class="field-label" for="fileInput">
         <svg class="field-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        Excel file (.xlsx)
+        Excel file
       </label>
 
       <label class="file-dropzone" for="fileInput">
-        <input id="fileInput" type="file" accept=".xlsx" />
+        <input id="fileInput" type="file" accept=".xlsx,.xlsm,.xltx,.xltm,.xls" />
         <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span id="dropzoneTitle" class="dropzone-title">Choose an Excel file</span>
-        <span id="dropzoneHint" class="dropzone-hint">.xlsx &middot; a &ldquo;Name&rdquo; column is required</span>
+        <span id="dropzoneHint" class="dropzone-hint">ID&rdquo;, &ldquo;Name&rdquo; and &ldquo;Description&rdquo; columns required</span>
       </label>
 
       <p id="fileError" class="field-error" role="alert" style="display: none;"></p>

@@ -21,10 +21,11 @@ export async function loadExcelJS() {
 }
 
 // Reads a cell's display text plus its hyperlink target. The URL falls
-// back to the display text when the cell isn't linked.
-export function readCell(worksheet, row, colIdx) {
+// back to the display text when the cell isn't linked. Pass the row object
+// so the sheet's row map isn't re-resolved for every cell.
+export function readCell(row, colIdx) {
   if (colIdx < 0) return { text: "", url: "" };
-  const cell = worksheet.getCell(row, colIdx + 1);
+  const cell = row.getCell(colIdx + 1);
   const text = String(cell.text ?? "").trim();
   const url = String(cell.hyperlink ?? "").trim();
   return { text, url: url || text };
@@ -50,24 +51,21 @@ export function parseSheetRows(worksheet) {
   };
 
   const nameIdx = findCol("name");
-  if (nameIdx < 0) return [];
-
   const descIdx = findCol("description");
   const idIdx = findCol("id");
+  if (nameIdx < 0 || descIdx < 0 || idIdx < 0) return [];
 
   const parsed = [];
   for (let r = 2; r <= worksheet.actualRowCount; r++) {
-    const name = String(worksheet.getCell(r, nameIdx + 1).text ?? "").trim();
+    const row = worksheet.getRow(r);
+    const name = String(row.getCell(nameIdx + 1).text ?? "").trim();
     if (!name) continue;
 
-    const idCell = readCell(worksheet, r, idIdx);
+    const idCell = readCell(row, idIdx);
     parsed.push({
       rowIndex: r - 1,
       name,
-      description:
-        descIdx < 0
-          ? ""
-          : String(worksheet.getCell(r, descIdx + 1).text ?? "").trim(),
+      description: String(row.getCell(descIdx + 1).text ?? "").trim(),
       sourceUrl: idCell.url,
       idText: idCell.text,
     });

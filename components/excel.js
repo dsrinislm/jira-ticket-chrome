@@ -37,13 +37,16 @@ export function handleFileSelected() {
       const workbook = new ExcelJS.Workbook();
       await workbook.xlsx.load(e.target.result);
       state.importData = e.target.result;
+      state.importExt = file.name.includes(".")
+        ? file.name.split(".").pop().toLowerCase()
+        : "xlsx";
       const sheet = workbook.worksheets[0];
       const parsed = parseSheetRows(sheet);
 
       if (!parsed.length) {
         resetDropzone();
         fileError.textContent =
-          'No usable rows found — check for a "Name" column.';
+          'No usable rows found — check for "ID", "Name", and "Description" columns.';
         fileError.style.display = "block";
         return;
       }
@@ -90,7 +93,15 @@ export async function downloadPreviewReport() {
     });
 
     buildReport(workbook, rows);
-    downloadBlob("octane-jira-report.xlsx", await workbook.xlsx.writeBuffer());
+
+    const ts = new Date();
+    const pad = (n) => String(n).padStart(2, "0");
+    const stamp = `${pad(ts.getDate())}_${pad(ts.getMonth() + 1)}_${ts.getFullYear()}_${pad(ts.getHours())}_${pad(ts.getMinutes())}_${pad(ts.getSeconds())}`;
+
+    downloadBlob(
+      `Octane_jira_export_${stamp}.${state.importExt || "xlsx"}`,
+      await workbook.xlsx.writeBuffer(),
+    );
   } catch (err) {
     console.error("ExcelJS export failed:", err);
     setStatus("Couldn't download the report.", "error");
