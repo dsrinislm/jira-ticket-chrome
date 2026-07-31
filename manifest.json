@@ -4,9 +4,7 @@
   "version": "1.0",
   "description": "Create your JIRA ticket",
   "permissions": [
-    "cookies",
     "activeTab",
-    "tabs",
     "storage",
     "scripting"
   ],
@@ -25,7 +23,7 @@
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
       "48": "icons/icon48.png",
-      "128": "icons/icon48.png"
+      "128": "icons/icon128.png"
     }
   }
 }

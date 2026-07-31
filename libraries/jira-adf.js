@@ -273,7 +273,20 @@
     };
   }
 
+  // Building a mediaSingle node can throw (e.g. `new URL()` on a relative
+  // or data: src) — that used to bubble all the way up and abort the
+  // entire conversion over one bad image. Now it just drops that image
+  // and the rest of the document still comes through.
   function image(node) {
+    let url;
+    try {
+      url = new URL(node.src);
+    } catch {
+      return null;
+    }
+
+    if (url.protocol !== "https:") return null;
+
     return {
       type: "mediaSingle",
       attrs: {
@@ -284,7 +297,7 @@
           type: "media",
           attrs: {
             type: "external",
-            url: new URL(node.src).protocol === "https:" ? node.src : "",
+            url: url.href,
           },
         },
       ],

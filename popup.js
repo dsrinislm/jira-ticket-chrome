@@ -9,8 +9,7 @@ const createTicketBtn = document.getElementById("createTicket");
 const projectTagsContainer = document.getElementById("projectTags");
 
 document.addEventListener("DOMContentLoaded", () => {
-  loadSettings();
-  loadProjectHistory();
+  loadInitialState();
 
   jiraBaseUrlInput.addEventListener("input", () => {
     // Never introduce a new error while typing — only clear one that's
@@ -34,6 +33,16 @@ function debounce(fn, delay) {
     clearTimeout(timer);
     timer = setTimeout(() => fn(...args), delay);
   };
+}
+
+// Escapes text before it's interpolated into innerHTML. Project keys are
+// user input (and project history is persisted across sessions), and the
+// ticket key/url come back from the Jira API response — none of that
+// should be trusted enough to inject as raw markup.
+function escapeHtml(value) {
+  const div = document.createElement("div");
+  div.textContent = String(value ?? "");
+  return div.innerHTML;
 }
 
 // Strips anything past the origin (path, query, hash) so the field can
@@ -174,13 +183,20 @@ function setBusy(isBusy) {
   projectKeyInput.disabled = isBusy;
 }
 
-function loadSettings() {
-  chrome.storage.local.get(["jiraBaseUrl", "projectKey"], (data) => {
-    if (data.jiraBaseUrl) jiraBaseUrlInput.value = data.jiraBaseUrl;
-    if (data.projectKey) projectKeyInput.value = data.projectKey;
-    // Don't validate/show errors here — jiraBaseUrlTouched is still
-    // false, so this only takes effect after the user leaves the field.
-  });
+// Single round trip to storage on popup open instead of two separate
+// get() calls (settings + project history) racing independently.
+function loadInitialState() {
+  chrome.storage.local.get(
+    ["jiraBaseUrl", "projectKey", "projectHistory"],
+    (data) => {
+      if (data.jiraBaseUrl) jiraBaseUrlInput.value = data.jiraBaseUrl;
+      if (data.projectKey) projectKeyInput.value = data.projectKey;
+      // Don't validate/show errors here — the user hasn't touched the
+      // field yet, so this only takes effect after blur.
+
+      renderProjectHistory(data.projectHistory || []);
+    },
+  );
 }
 
 function saveSettings() {
@@ -196,46 +212,45 @@ function removeProjectTag(projectKey) {
       (item) => item !== projectKey,
     );
 
-    chrome.storage.local.set({ projectHistory: history }, loadProjectHistory);
+    chrome.storage.local.set({ projectHistory: history }, () =>
+      renderProjectHistory(history),
+    );
   });
 }
 
-function loadProjectHistory() {
+function renderProjectHistory(projects) {
   if (!projectTagsContainer) return;
 
-  chrome.storage.local.get(["projectHistory"], (data) => {
-    projectTagsContainer.innerHTML = "";
+  projectTagsContainer.innerHTML = "";
 
-    const projects = data.projectHistory || [];
+  if (projects.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "project-tags-empty";
+    empty.textContent = "No recent projects yet.";
+    projectTagsContainer.appendChild(empty);
+    return;
+  }
 
-    if (projects.length === 0) {
-      const empty = document.createElement("span");
-      empty.className = "project-tags-empty";
-      empty.textContent = "No recent projects yet.";
-      projectTagsContainer.appendChild(empty);
-      return;
-    }
+  projects.forEach((project) => {
+    const tag = document.createElement("div");
+    tag.className = "project-tag";
+    // project keys are persisted user input — escape before injecting.
+    tag.innerHTML = `
+      <span class="tag-text">${escapeHtml(project)}</span>
+      <span class="tag-close" title="Remove">✕</span>
+    `;
 
-    projects.forEach((project) => {
-      const tag = document.createElement("div");
-      tag.className = "project-tag";
-      tag.innerHTML = `
-        <span class="tag-text">${project}</span>
-        <span class="tag-close" title="Remove">✕</span>
-      `;
-
-      tag.querySelector(".tag-text").addEventListener("click", () => {
-        projectKeyInput.value = project;
-        saveSettings();
-      });
-
-      tag.querySelector(".tag-close").addEventListener("click", (e) => {
-        e.stopPropagation();
-        removeProjectTag(project);
-      });
-
-      projectTagsContainer.appendChild(tag);
+    tag.querySelector(".tag-text").addEventListener("click", () => {
+      projectKeyInput.value = project;
+      saveSettings();
     });
+
+    tag.querySelector(".tag-close").addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeProjectTag(project);
+    });
+
+    projectTagsContainer.appendChild(tag);
   });
 }
 
@@ -246,7 +261,9 @@ function saveProjectHistory(projectKey) {
     history.unshift(projectKey);
     history = history.slice(0, 15);
 
-    chrome.storage.local.set({ projectHistory: history }, loadProjectHistory);
+    chrome.storage.local.set({ projectHistory: history }, () =>
+      renderProjectHistory(history),
+    );
   });
 }
 
@@ -359,17 +376,22 @@ async function createTicket() {
 
     setStatus(`Created ${issue.key}.`, "success");
 
+    // issue.key / issueUrl come from the Jira API response — escape
+    // before injecting into innerHTML rather than trusting the server.
+    const safeKey = escapeHtml(issue.key);
+    const safeUrl = escapeHtml(issueUrl);
+
     ticketResult.innerHTML = `
     <div class="ticket-card">
       <div class="ticket-key">
-        <a id="jiraIssueLink" href="${issueUrl}" target="_blank" rel="noopener noreferrer">
-          ${issue.key}
+        <a id="jiraIssueLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
+          ${safeKey}
         </a>
       </div>
 
       <div class="ticket-url">
-        <a id="jiraUrlLink" href="${issueUrl}" target="_blank" rel="noopener noreferrer">
-          ${issueUrl}
+        <a id="jiraUrlLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
+          ${safeUrl}
         </a>
       </div>
     </div>
@@ -487,7 +509,13 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
 
   const response = await jiraFetch(jiraBaseUrl, "/rest/api/3/issue", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      // Jira Server/Data Center rejects cookie-authenticated POSTs
+      // without this unless the caller opts out of XSRF checking.
+      // Jira Cloud ignores the header, so it's safe to send always.
+      "X-Atlassian-Token": "no-check",
+    },
     body: JSON.stringify(payload),
   });
 
