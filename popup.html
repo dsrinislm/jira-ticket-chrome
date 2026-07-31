@@ -68,8 +68,18 @@
   <!-- Bulk-import view -->
   <div id="bulkView" class="view" style="display: none;">
     <section class="field-block">
-      <label class="field-label" for="fileInput">Excel file (.xlsx)</label>
-      <input id="fileInput" type="file" accept=".xlsx,.xls" />
+      <label class="field-label" for="fileInput">
+        <svg class="field-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Excel file (.xlsx)
+      </label>
+
+      <label class="file-dropzone" for="fileInput">
+        <input id="fileInput" type="file" accept=".xlsx,.xls" />
+        <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span id="dropzoneTitle" class="dropzone-title">Choose an Excel file</span>
+        <span id="dropzoneHint" class="dropzone-hint">.xlsx or .xls &middot; a &ldquo;Name&rdquo; column is required</span>
+      </label>
+
       <p id="fileError" class="field-error" role="alert" style="display: none;"></p>
       <p id="fileSummary" class="file-summary"></p>
     </section>
@@ -95,6 +105,16 @@
           </thead>
           <tbody id="previewBody"></tbody>
         </table>
+      </div>
+
+      <div id="progressSection" class="progress" role="progressbar" aria-label="Import progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="display: none;">
+        <div class="progress-head">
+          <span id="progressLabel" class="progress-label">Importing tickets…</span>
+          <span id="progressPercent" class="progress-percent">0%</span>
+        </div>
+        <div class="progress-track">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
       </div>
 
       <button id="importBtn" type="button" class="btn-primary">

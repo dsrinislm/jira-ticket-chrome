@@ -19,6 +19,13 @@ const previewBody = document.getElementById("previewBody");
 const selectAllCheckbox = document.getElementById("selectAllCheckbox");
 const selectionCount = document.getElementById("selectionCount");
 const importBtn = document.getElementById("importBtn");
+const dropzone = document.querySelector(".file-dropzone");
+const dropzoneTitle = document.getElementById("dropzoneTitle");
+const dropzoneHint = document.getElementById("dropzoneHint");
+const progressSection = document.getElementById("progressSection");
+const progressLabel = document.getElementById("progressLabel");
+const progressPercent = document.getElementById("progressPercent");
+const progressBar = document.getElementById("progressBar");
 
 let bulkRows = [];
 
@@ -61,7 +68,6 @@ function debounce(fn, delay) {
 }
 function switchView(view) {
   const isBulk = view === "bulk";
-  document.body.classList.toggle("view-bulk", isBulk);
 
   singleView.style.display = isBulk ? "none" : "block";
   bulkView.style.display = isBulk ? "block" : "none";
@@ -73,7 +79,7 @@ function switchView(view) {
 
   setStatus(
     isBulk
-      ? "Choose an Excel file to begin."
+      ? "Select the tickets to import."
       : "Configure Jira details and create a ticket.",
     "info",
   );
@@ -110,9 +116,14 @@ function handleFileSelected() {
   const file = fileInput.files[0];
   fileError.style.display = "none";
   previewSection.style.display = "none";
+  progressSection.style.display = "none";
   bulkRows = [];
 
   if (!file) return;
+
+  dropzone.dataset.loaded = "true";
+  dropzoneTitle.textContent = file.name;
+  dropzoneHint.textContent = "Reading file…";
 
   const reader = new FileReader();
   reader.onload = (e) => {
@@ -129,6 +140,7 @@ function handleFileSelected() {
         .filter((r) => r.name);
 
       if (!parsed.length) {
+        resetDropzone();
         fileError.textContent =
           'No usable rows found — check for a "Name" column.';
         fileError.style.display = "block";
@@ -136,17 +148,27 @@ function handleFileSelected() {
       }
 
       loadBulkRows(parsed);
-      fileSummary.textContent = `${parsed.length} row(s) loaded from "${file.name}".`;
+      dropzoneHint.textContent = "Click to choose a different file";
+      fileSummary.textContent = `${parsed.length} row(s) loaded.`;
     } catch (err) {
+      resetDropzone();
       fileError.textContent = `Couldn't read that file: ${err.message}`;
       fileError.style.display = "block";
     }
   };
   reader.onerror = () => {
+    resetDropzone();
     fileError.textContent = "Failed to read the file.";
     fileError.style.display = "block";
   };
   reader.readAsArrayBuffer(file);
+}
+
+function resetDropzone() {
+  dropzone.dataset.loaded = "false";
+  dropzoneTitle.textContent = "Choose an Excel file";
+  dropzoneHint.textContent =
+    '.xlsx or .xls · a "Name" column is required';
 }
 
 function loadBulkRows(parsed) {
@@ -317,6 +339,9 @@ async function runBulkImport() {
     skipped = 0,
     failed = 0;
 
+  progressSection.style.display = "block";
+  updateProgress(0, selectedRows.length, "Starting import…");
+
   for (let i = 0; i < selectedRows.length; i++) {
     const row = selectedRows[i];
     setStatus(`Processing ${i + 1} of ${selectedRows.length}...`, "loading");
@@ -366,7 +391,10 @@ async function runBulkImport() {
     }
 
     await new Promise((resolve) => setTimeout(resolve, 250));
+    updateProgress(i + 1, selectedRows.length);
   }
+
+  updateProgress(selectedRows.length, selectedRows.length, "Import complete");
 
   setStatus(
     `Done. ${created} created, ${skipped} already existed, ${failed} failed.`,
@@ -375,6 +403,15 @@ async function runBulkImport() {
   importBtn.disabled = false;
   importBtn.dataset.loading = "false";
   fileInput.disabled = false;
+}
+
+function updateProgress(completed, total, label) {
+  const pct = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+  progressBar.style.width = `${pct}%`;
+  progressBar.dataset.done = String(completed >= total && total > 0);
+  progressPercent.textContent = `${pct}%`;
+  progressSection.setAttribute("aria-valuenow", String(pct));
+  progressLabel.textContent = label || `Importing ${completed} of ${total}…`;
 }
 // Escapes text before it's interpolated into innerHTML. Project keys are
 // user input (and project history is persisted across sessions), and the
