@@ -59,7 +59,8 @@ function stripPathFromJiraBaseUrl(value) {
     return value; // not parseable yet (still mid-typing the host) — leave as-is
   }
 
-  const hasExtra = (url.pathname && url.pathname !== "/") || url.search || url.hash;
+  const hasExtra =
+    (url.pathname && url.pathname !== "/") || url.search || url.hash;
   if (!hasExtra) return value;
 
   return url.origin;
@@ -99,7 +100,10 @@ function validateJiraBaseUrl(rawValue) {
   try {
     url = new URL(value);
   } catch {
-    return { valid: false, message: "Enter a valid URL, e.g. https://company.atlassian.net" };
+    return {
+      valid: false,
+      message: "Enter a valid URL, e.g. https://company.atlassian.net",
+    };
   }
 
   if (url.protocol !== "https:") {
@@ -138,7 +142,10 @@ function validateJiraBaseUrl(rawValue) {
 
 function applyJiraBaseUrlErrorState(showAsInvalid, message) {
   jiraBaseUrlInput.classList.toggle("invalid", showAsInvalid);
-  jiraBaseUrlInput.setAttribute("aria-invalid", showAsInvalid ? "true" : "false");
+  jiraBaseUrlInput.setAttribute(
+    "aria-invalid",
+    showAsInvalid ? "true" : "false",
+  );
 
   if (jiraBaseUrlError) {
     jiraBaseUrlError.textContent = showAsInvalid ? message : "";
@@ -319,6 +326,23 @@ async function createTicket() {
 
     const cleanTitle = pageData.title?.replace(/^OCTANE \|\s*$/, "").trim();
     const finalSummary = cleanTitle ? pageData.title : "Imported QA Ticket";
+
+    setStatus("Checking for an existing ticket...", "loading");
+
+    const existing = await findExistingJiraIssue(
+      jiraUrl.origin,
+      projectKey,
+      finalSummary,
+    );
+
+    if (existing) {
+      const issueUrl = `${jiraUrl.origin}/browse/${existing.key}`;
+      setStatus(`Ticket already exists: ${existing.key}`, "success");
+      renderTicketCard(existing.key, issueUrl);
+      saveProjectHistory(projectKey);
+      return;
+    }
+
     const bodyAdf = htmlToADF(pageData.html);
 
     const issueDescription = {
@@ -365,12 +389,106 @@ async function createTicket() {
     };
 
     setStatus("Creating Jira ticket...", "loading");
+
     const issue = await createJiraIssue(
       jiraUrl.origin,
       projectKey,
       finalSummary,
       issueDescription,
     );
+
+    if (pageData.images?.length) {
+      setStatus("Uploading images...", "loading");
+
+      const byPlaceholder = {};
+
+      for (const img of pageData.images) {
+        try {
+          const blob = dataUrlToBlob(img.dataUrl);
+          const ext = (blob.type.split("/")[1] || "png").split("+")[0];
+          const attachment = await uploadJiraAttachment(
+            jiraUrl.origin,
+            issue.key,
+            blob,
+            `${img.placeholder}.${ext}`,
+          );
+          byPlaceholder[img.placeholder] = fileMediaNode(attachment);
+        } catch (err) {
+          console.error("Image upload failed:", img.placeholder, err);
+        }
+      }
+
+      setStatus("Attaching images to ticket...", "loading");
+
+      await updateJiraIssueDescription(
+        jiraUrl.origin,
+        issue.key,
+        insertUploadedImages(issueDescription.content, byPlaceholder),
+      );
+    }
+
+    function escapeJqlString(value) {
+      return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    }
+
+    // Jira deprecated GET /rest/api/3/search in favor of the enhanced
+    // JQL search endpoint — use that here.
+    async function findExistingJiraIssue(jiraBaseUrl, projectKey, summary) {
+      const jql = `project = "${escapeJqlString(projectKey)}" AND summary ~ "${escapeJqlString(summary)}"`;
+
+      let response;
+      try {
+        response = await jiraFetch(jiraBaseUrl, "/rest/api/3/search/jql", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jql,
+            fields: ["summary"],
+            maxResults: 50,
+          }),
+        });
+      } catch {
+        return null; // network hiccup — don't block ticket creation over a dup check
+      }
+
+      if (!response.ok) return null;
+
+      const data = await response.json();
+      const target = summary.trim().toLowerCase();
+
+      return (
+        (data.issues || []).find(
+          (issue) => issue.fields?.summary?.trim().toLowerCase() === target,
+        ) || null
+      );
+    }
+    function renderTicketCard(issueKey, issueUrl) {
+      const safeKey = escapeHtml(issueKey);
+      const safeUrl = escapeHtml(issueUrl);
+
+      ticketResult.innerHTML = `
+        <div class="ticket-card">
+          <div class="ticket-key">
+            <a id="jiraIssueLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
+              ${safeKey}
+            </a>
+          </div>
+          <div class="ticket-url">
+            <a id="jiraUrlLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
+              ${safeUrl}
+            </a>
+          </div>
+        </div>
+      `;
+
+      ["jiraIssueLink", "jiraUrlLink"].forEach((id) => {
+        const link = document.getElementById(id);
+        link?.addEventListener("click", (e) => {
+          e.preventDefault();
+          chrome.tabs.create({ url: issueUrl });
+        });
+      });
+    }
 
     const issueUrl = `${jiraUrl.origin}/browse/${issue.key}`;
 
@@ -404,6 +522,8 @@ async function createTicket() {
         chrome.tabs.create({ url: issueUrl });
       });
     });
+    setStatus(`Created ${issue.key}.`, "success");
+    renderTicketCard(issue.key, issueUrl);
     saveProjectHistory(projectKey);
   } catch (error) {
     console.error(error);
@@ -418,7 +538,7 @@ async function getPageData() {
 
   const results = await chrome.scripting.executeScript({
     target: { tabId: currentTab.id },
-    func: () => {
+    func: async () => {
       const title =
         document.querySelector(
           ".document-view-header-entity-name--custom-label",
@@ -429,19 +549,141 @@ async function getPageData() {
         .replace(/\s*\|\s*/g, " | ")
         .replace(/\s+/g, " ")
         .trim()}`;
+
       const editor = document.querySelector(".fr-element");
+      const images = [];
+      let html = "";
 
-      const html = editor?.innerHTML || "";
+      if (editor) {
+        // Work on a clone so we never touch the live editor content.
+        const container = editor.cloneNode(true);
+        const imgEls = Array.from(container.querySelectorAll("img"));
 
-      return {
-        title: jiraTitle,
-        url: location.href,
-        html,
-      };
+        for (let i = 0; i < imgEls.length; i++) {
+          const imgEl = imgEls[i];
+          const placeholder = `__JIRA_IMG_${i}__`;
+
+          try {
+            // imgEl.src is the browser-resolved absolute URL (resolved
+            // against THIS page's origin), and this fetch runs with the
+            // page's own cookies — so it works even for relative paths
+            // and authenticated Octane attachment URLs.
+            const response = await fetch(imgEl.src, { credentials: "include" });
+            const blob = await response.blob();
+            const dataUrl = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            });
+
+            images.push({ placeholder, dataUrl });
+            imgEl.replaceWith(document.createTextNode(placeholder));
+          } catch {
+            // Couldn't fetch this one — drop it rather than aborting
+            // the whole capture.
+            imgEl.remove();
+          }
+        }
+
+        html = container.innerHTML;
+      }
+
+      return { title: jiraTitle, url: location.href, html, images };
     },
   });
 
   return results[0].result;
+}
+
+// Converts a `data:` URL into a Blob for multipart upload.
+function dataUrlToBlob(dataUrl) {
+  const [header, base64] = dataUrl.split(",");
+  const mime =
+    /data:(.*?);base64/.exec(header)?.[1] || "application/octet-stream";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename) {
+  const formData = new FormData();
+  formData.append("file", blob, filename);
+
+  const response = await fetch(
+    `${jiraBaseUrl}/rest/api/3/issue/${issueKey}/attachments`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "X-Atlassian-Token": "no-check",
+        // No Content-Type — the browser must set the multipart boundary itself.
+      },
+      body: formData,
+    },
+  );
+
+  if (!response.ok)
+    throw new Error(`Image upload failed (status ${response.status}).`);
+  const data = await response.json();
+  return data[0]; // { id, filename, ... }
+}
+
+function fileMediaNode(attachment) {
+  return {
+    type: "mediaSingle",
+    attrs: { layout: "center" },
+    content: [
+      {
+        type: "media",
+        attrs: { type: "file", id: attachment.id, collection: "" },
+      },
+    ],
+  };
+}
+
+// Swaps `__JIRA_IMG_n__` placeholder paragraphs for the real uploaded
+// attachment's media node.
+function insertUploadedImages(adfContent, byPlaceholder) {
+  return adfContent.flatMap((node) => {
+    if (
+      node.type === "paragraph" &&
+      node.content?.length === 1 &&
+      node.content[0].type === "text"
+    ) {
+      const match = /^__JIRA_IMG_(\d+)__$/.exec(node.content[0].text.trim());
+      if (match) {
+        const media = byPlaceholder[`__JIRA_IMG_${match[1]}__`];
+        return media ? [media] : [];
+      }
+    }
+    if (Array.isArray(node.content)) {
+      return [
+        { ...node, content: insertUploadedImages(node.content, byPlaceholder) },
+      ];
+    }
+    return [node];
+  });
+}
+
+async function updateJiraIssueDescription(jiraBaseUrl, issueKey, contentNodes) {
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    `/rest/api/3/issue/${issueKey}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fields: {
+          description: { version: 1, type: "doc", content: contentNodes },
+        },
+      }),
+    },
+  );
+  if (!response.ok)
+    throw new Error(`Attaching images failed (status ${response.status}).`);
 }
 
 async function jiraFetch(jiraBaseUrl, path, options = {}) {
