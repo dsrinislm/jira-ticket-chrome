@@ -66,6 +66,9 @@ function debounce(fn, delay) {
     timer = setTimeout(() => fn(...args), delay);
   };
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function switchView(view) {
   const isBulk = view === "bulk";
 
@@ -79,7 +82,7 @@ function switchView(view) {
 
   setStatus(
     isBulk
-      ? "Select the tickets to import."
+      ? "Select the file to import."
       : "Configure Jira details and create a ticket.",
     "info",
   );
@@ -150,6 +153,7 @@ function handleFileSelected() {
       loadBulkRows(parsed);
       dropzoneHint.textContent = "Click to choose a different file";
       fileSummary.textContent = `${parsed.length} row(s) loaded.`;
+      setStatus("Select the tickets to import.", "info");
     } catch (err) {
       resetDropzone();
       fileError.textContent = `Couldn't read that file: ${err.message}`;
@@ -175,6 +179,8 @@ function loadBulkRows(parsed) {
   previewBody.innerHTML = "";
   bulkRows = [];
 
+  const fragment = document.createDocumentFragment();
+
   parsed.forEach((record) => {
     const title = `OCTANE | ${record.name}`;
     const tr = document.createElement("tr");
@@ -187,7 +193,10 @@ function loadBulkRows(parsed) {
     checkTd.appendChild(checkbox);
 
     const titleTd = document.createElement("td");
-    titleTd.innerHTML = `<span class="row-title">${escapeHtml(title)}</span>`;
+    const titleSpan = document.createElement("span");
+    titleSpan.className = "row-title";
+    titleSpan.textContent = title;
+    titleTd.appendChild(titleSpan);
 
     const descTd = document.createElement("td");
     descTd.className = "row-desc";
@@ -200,7 +209,7 @@ function loadBulkRows(parsed) {
     statusTd.textContent = "Not started";
 
     tr.append(checkTd, titleTd, descTd, statusTd);
-    previewBody.appendChild(tr);
+    fragment.appendChild(tr);
 
     bulkRows.push({
       title,
@@ -210,6 +219,7 @@ function loadBulkRows(parsed) {
     });
   });
 
+  previewBody.appendChild(fragment);
   previewSection.style.display = "block";
   updateSelectionCount();
 }
@@ -309,100 +319,89 @@ async function runBulkImport() {
   saveSettings();
   const jiraOrigin = new URL(jiraBaseUrlInput.value.trim()).origin;
 
-  importBtn.disabled = true;
-  importBtn.dataset.loading = "true";
-  fileInput.disabled = true;
+  setBulkBusy(true);
 
-  setStatus("Checking Jira session...", "loading");
-  if (!(await isJiraLoggedIn(jiraOrigin))) {
-    setStatus(
-      "Jira login required. Open Jira in a tab, log in, then retry.",
-      "error",
-    );
-    importBtn.disabled = false;
-    importBtn.dataset.loading = "false";
-    fileInput.disabled = false;
-    return;
-  }
-
-  setStatus("Validating project access...", "loading");
-  const projectValidation = await validateProject(jiraOrigin, projectKey);
-  if (!projectValidation.success) {
-    setStatus(projectValidation.message, "error");
-    importBtn.disabled = false;
-    importBtn.dataset.loading = "false";
-    fileInput.disabled = false;
-    return;
-  }
-
-  let created = 0,
-    skipped = 0,
-    failed = 0;
-
-  progressSection.style.display = "block";
-  updateProgress(0, selectedRows.length, "Starting import…");
-
-  for (let i = 0; i < selectedRows.length; i++) {
-    const row = selectedRows[i];
-    setStatus(`Processing ${i + 1} of ${selectedRows.length}...`, "loading");
-    setRowStatus(row, "checking", "Checking…");
-
-    try {
-      const existing = await findExistingJiraIssue(
-        jiraOrigin,
-        projectKey,
-        row.title,
+  try {
+    setStatus("Checking Jira session...", "loading");
+    if (!(await isJiraLoggedIn(jiraOrigin))) {
+      setStatus(
+        "Jira login required. Open Jira in a tab, log in, then retry.",
+        "error",
       );
-
-      if (existing.error) {
-        setRowStatus(row, "error", "Duplicate check failed");
-        failed++;
-        continue;
-      }
-
-      if (existing.issue) {
-        const url = `${jiraOrigin}/browse/${existing.issue.key}`;
-        setRowStatus(
-          row,
-          "exists",
-          `Already exists — <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(existing.issue.key)}</a>`,
-        );
-        skipped++;
-        continue;
-      }
-
-      setRowStatus(row, "creating", "Creating…");
-      const issue = await createJiraIssue(
-        jiraOrigin,
-        projectKey,
-        row.title,
-        textToADF(row.description),
-      );
-      const url = `${jiraOrigin}/browse/${issue.key}`;
-      setRowStatus(
-        row,
-        "created",
-        `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>`,
-      );
-      created++;
-    } catch (err) {
-      setRowStatus(row, "error", escapeHtml(err.message || "Failed"));
-      failed++;
+      return;
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    updateProgress(i + 1, selectedRows.length);
+    setStatus("Validating project access...", "loading");
+    const projectValidation = await validateProject(jiraOrigin, projectKey);
+    if (!projectValidation.success) {
+      setStatus(projectValidation.message, "error");
+      return;
+    }
+
+    let created = 0,
+      skipped = 0,
+      failed = 0;
+
+    progressSection.style.display = "block";
+    updateProgress(0, selectedRows.length, "Starting import…");
+
+    for (let i = 0; i < selectedRows.length; i++) {
+      const row = selectedRows[i];
+      setStatus(`Processing ${i + 1} of ${selectedRows.length}...`, "loading");
+      setRowStatus(row, "checking", "Checking…");
+
+      try {
+        const existing = await findExistingJiraIssue(
+          jiraOrigin,
+          projectKey,
+          row.title,
+        );
+
+        if (existing.error) {
+          setRowStatus(row, "error", "Duplicate check failed");
+          failed++;
+        } else if (existing.issue) {
+          const url = `${jiraOrigin}/browse/${existing.issue.key}`;
+          setRowStatus(
+            row,
+            "exists",
+            `Already exists — <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(existing.issue.key)}</a>`,
+          );
+          skipped++;
+        } else {
+          setRowStatus(row, "creating", "Creating…");
+          const issue = await createJiraIssue(
+            jiraOrigin,
+            projectKey,
+            row.title,
+            textToADF(row.description),
+          );
+          const url = `${jiraOrigin}/browse/${issue.key}`;
+          setRowStatus(
+            row,
+            "created",
+            `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>`,
+          );
+          created++;
+        }
+      } catch (err) {
+        setRowStatus(row, "error", escapeHtml(err.message || "Failed"));
+        failed++;
+      }
+
+      await sleep(250);
+      updateProgress(i + 1, selectedRows.length);
+    }
+
+    updateProgress(selectedRows.length, selectedRows.length, "Import complete");
+
+    setStatus(
+      `Done. ${created} created, ${skipped} already existed, ${failed} failed.`,
+      failed ? "error" : "success",
+    );
+  } finally {
+    setBulkBusy(false);
   }
-
-  updateProgress(selectedRows.length, selectedRows.length, "Import complete");
-
-  setStatus(
-    `Done. ${created} created, ${skipped} already existed, ${failed} failed.`,
-    failed ? "error" : "success",
-  );
-  importBtn.disabled = false;
-  importBtn.dataset.loading = "false";
-  fileInput.disabled = false;
 }
 
 function updateProgress(completed, total, label) {
@@ -418,9 +417,19 @@ function updateProgress(completed, total, label) {
 // ticket key/url come back from the Jira API response — none of that
 // should be trusted enough to inject as raw markup.
 function escapeHtml(value) {
-  const div = document.createElement("div");
-  div.textContent = String(value ?? "");
-  return div.innerHTML;
+  return String(value ?? "").replace(
+    /[&<>"']/g,
+    (c) =>
+      c === "&"
+        ? "&amp;"
+        : c === "<"
+          ? "&lt;"
+          : c === ">"
+            ? "&gt;"
+            : c === '"'
+              ? "&quot;"
+              : "&#39;",
+  );
 }
 
 // Strips anything past the origin (path, query, hash) so the field can
@@ -566,6 +575,12 @@ function setBusy(isBusy) {
   createTicketBtn.dataset.loading = isBusy ? "true" : "false";
   jiraBaseUrlInput.disabled = isBusy;
   projectKeyInput.disabled = isBusy;
+}
+
+function setBulkBusy(isBusy) {
+  importBtn.disabled = isBusy;
+  importBtn.dataset.loading = isBusy ? "true" : "false";
+  fileInput.disabled = isBusy;
 }
 
 // Single round trip to storage on popup open instead of two separate
@@ -807,34 +822,6 @@ async function createTicket() {
       );
     }
 
-    // issue.key / issueUrl come from the Jira API response — escape
-    // before injecting into innerHTML rather than trusting the server.
-    const safeKey = escapeHtml(issue.key);
-    const safeUrl = escapeHtml(issueUrl);
-
-    ticketResult.innerHTML = `
-    <div class="ticket-card">
-      <div class="ticket-key">
-        <a id="jiraIssueLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
-          ${safeKey}
-        </a>
-      </div>
-
-      <div class="ticket-url">
-        <a id="jiraUrlLink" href="${safeUrl}" target="_blank" rel="noopener noreferrer">
-          ${safeUrl}
-        </a>
-      </div>
-    </div>
-  `;
-
-    ["jiraIssueLink", "jiraUrlLink"].forEach((id) => {
-      const link = document.getElementById(id);
-      link?.addEventListener("click", (e) => {
-        e.preventDefault();
-        chrome.tabs.create({ url: issueUrl });
-      });
-    });
     const issueUrl = `${jiraUrl.origin}/browse/${issue.key}`;
     setStatus(`Created ${issue.key}.`, "success");
     renderTicketCard(issue.key, issueUrl);
