@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>JIRA Ticket Creator</title>
+
+  <link rel="stylesheet" href="popup.css" />
+</head>
+
+<body>
+  <header class="app-header">
+    <div class="mark" aria-hidden="true">
+      <img src="./icons/icon128.png" alt="" />
+    </div>
+    <div class="header-text">
+      <p class="eyebrow">Octane&nbsp;→&nbsp;Jira</p>
+      <h1>Ticket Creator</h1>
+    </div>
+  </header>
+
+  <section class="field-block">
+    <label class="field-label" for="jiraBaseUrl">
+      <svg class="field-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M13.5 10.5 21 3M21 3h-5.5M21 3v5.5M11 5H7a4 4 0 0 0-4 4v8a4 4 0 0 0 4 4h8a4 4 0 0 0 4-4v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Base URL
+    </label>
+    <input
+      id="jiraBaseUrl"
+      type="text"
+      inputmode="url"
+      autocomplete="off"
+      placeholder="https://company.atlassian.net"
+    />
+
+    <label class="field-label" for="projectKey">
+      <svg class="field-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m20.6 12.6-7.9 7.9a2 2 0 0 1-2.8 0l-7-7a2 2 0 0 1 0-2.8l7.9-7.9A2 2 0 0 1 12.2 2H19a2 2 0 0 1 2 2v6.8a2 2 0 0 1-.4 1.8Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="15" cy="8" r="1.4" fill="currentColor"/></svg>
+      Project key
+    </label>
+    <input
+      id="projectKey"
+      type="text"
+      autocomplete="off"
+      placeholder="e.g. PROJ"
+    />
+
+    <div id="projectTags" class="project-tags" aria-label="Recent project keys"></div>
+  </section>
+
+  <div class="button-group">
+    <button id="createTicket" type="button">
+      <span class="btn-spinner" aria-hidden="true"></span>
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      <span class="btn-label">Create ticket</span>
+    </button>
+
+    <button id="openWebsite" class="btn-ghost" type="button" style="display: none;">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Log in to Jira
+    </button>
+  </div>
+
+  <div id="status" class="status" data-state="info">
+    <span class="status-cursor" aria-hidden="true"></span>
+    <span id="statusText" class="status-text">Configure Jira details and create a ticket.</span>
+  </div>
+
+  <div id="ticketResult"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
