@@ -1,0 +1,90 @@
+import {
+  jiraBaseUrlInput,
+  projectKeyInput,
+  projectTagsContainer,
+  escapeHtml,
+} from "./ui.js";
+
+// Single round trip to storage on popup open instead of two separate
+// get() calls (settings + project history) racing independently.
+export function loadInitialState() {
+  chrome.storage.local.get(
+    ["jiraBaseUrl", "projectKey", "projectHistory"],
+    (data) => {
+      if (data.jiraBaseUrl) jiraBaseUrlInput.value = data.jiraBaseUrl;
+      if (data.projectKey) projectKeyInput.value = data.projectKey;
+      // Don't validate/show errors here — the user hasn't touched the
+      // field yet, so this only takes effect after blur.
+
+      renderProjectHistory(data.projectHistory || []);
+    },
+  );
+}
+
+export function saveSettings() {
+  chrome.storage.local.set({
+    jiraBaseUrl: jiraBaseUrlInput.value.trim(),
+    projectKey: projectKeyInput.value.trim(),
+  });
+}
+
+export function removeProjectTag(projectKey) {
+  chrome.storage.local.get(["projectHistory"], (data) => {
+    const history = (data.projectHistory || []).filter(
+      (item) => item !== projectKey,
+    );
+
+    chrome.storage.local.set({ projectHistory: history }, () =>
+      renderProjectHistory(history),
+    );
+  });
+}
+
+export function renderProjectHistory(projects) {
+  if (!projectTagsContainer) return;
+
+  projectTagsContainer.innerHTML = "";
+
+  if (projects.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "project-tags-empty";
+    empty.textContent = "No recent projects yet.";
+    projectTagsContainer.appendChild(empty);
+    return;
+  }
+
+  projects.forEach((project) => {
+    const tag = document.createElement("div");
+    tag.className = "project-tag";
+    // project keys are persisted user input — escape before injecting.
+    tag.innerHTML = `
+      <span class="tag-text">${escapeHtml(project)}</span>
+      <span class="tag-close" title="Remove">✕</span>
+    `;
+
+    tag.addEventListener("click", () => {
+      projectKeyInput.value = project;
+      saveSettings();
+    });
+
+    tag.querySelector(".tag-close").addEventListener("click", (e) => {
+      e.stopPropagation();
+      removeProjectTag(project);
+    });
+
+    projectTagsContainer.appendChild(tag);
+  });
+}
+
+export function saveProjectHistory(projectKey) {
+  chrome.storage.local.get(["projectHistory"], (data) => {
+    let history = data.projectHistory || [];
+    history = history.filter((x) => x !== projectKey);
+    history.unshift(projectKey);
+    history = history.slice(0, 15);
+
+    chrome.storage.local.set({ projectHistory: history }, () =>
+      renderProjectHistory(history),
+    );
+  });
+}

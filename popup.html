@@ -74,10 +74,10 @@
       </label>
 
       <label class="file-dropzone" for="fileInput">
-        <input id="fileInput" type="file" accept=".xlsx,.xls" />
+        <input id="fileInput" type="file" accept=".xlsx" />
         <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span id="dropzoneTitle" class="dropzone-title">Choose an Excel file</span>
-        <span id="dropzoneHint" class="dropzone-hint">.xlsx or .xls &middot; a &ldquo;Name&rdquo; column is required</span>
+        <span id="dropzoneHint" class="dropzone-hint">.xlsx &middot; a &ldquo;Name&rdquo; column is required</span>
       </label>
 
       <p id="fileError" class="field-error" role="alert" style="display: none;"></p>
@@ -144,8 +144,7 @@
   </div>
 
   <script src="libraries/jira-adf.js"></script>
-  <script src="libraries/exceljs.min.js"></script>
-  <script src="popup.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 
 </html>
