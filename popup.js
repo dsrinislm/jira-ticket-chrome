@@ -103,10 +103,16 @@ function validateJiraBaseUrl(rawValue) {
 
   const hostname = url.hostname;
   const isLocalDev = hostname === "localhost" || hostname === "127.0.0.1";
-  const looksLikeDomain = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(hostname);
+  const looksLikeDomain =
+    /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i.test(
+      hostname,
+    );
 
   if (!isLocalDev && !looksLikeDomain) {
-    return { valid: false, message: "Enter a valid Jira domain, e.g. https://company.atlassian.net" };
+    return {
+      valid: false,
+      message: "Enter a valid Jira domain, e.g. https://company.atlassian.net",
+    };
   }
 
   const hasExtraPath = url.pathname && url.pathname !== "/";
@@ -267,7 +273,6 @@ async function createTicket() {
       return;
     }
 
-
     // Safe: validateJiraBaseUrlField() already confirmed this parses.
     const jiraUrl = new URL(jiraBaseUrl);
 
@@ -297,20 +302,50 @@ async function createTicket() {
 
     const cleanTitle = pageData.title?.replace(/^OCTANE \|\s*$/, "").trim();
     const finalSummary = cleanTitle ? pageData.title : "Imported QA Ticket";
+    const bodyAdf = htmlToADF(pageData.html);
 
-    const issueDescription = [
-      "SOURCE TICKET URL",
-      "",
-      pageData.url,
-      "",
-      "SOURCE TICKET TITLE",
-      "",
-      pageData.title,
-      "",
-      "SOURCE TICKET DETAILS",
-      "",
-      pageData.bodyText,
-    ].join("\n");
+    const issueDescription = {
+      version: 1,
+      type: "doc",
+      content: [
+        {
+          type: "heading",
+          attrs: { level: 3 },
+          content: [
+            {
+              type: "text",
+              text: "SOURCE TICKET URL",
+            },
+          ],
+        },
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "text",
+              text: pageData.url,
+              marks: [
+                {
+                  type: "link",
+                  attrs: {
+                    href: pageData.url,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+
+        // Add a separator paragraph (optional)
+        {
+          type: "paragraph",
+          content: [],
+        },
+
+        // Append the converted rich HTML
+        ...bodyAdf.content,
+      ],
+    };
 
     setStatus("Creating Jira ticket...", "loading");
     const issue = await createJiraIssue(
@@ -372,14 +407,14 @@ async function getPageData() {
         .replace(/\s*\|\s*/g, " | ")
         .replace(/\s+/g, " ")
         .trim()}`;
+      const editor = document.querySelector(".fr-element");
+
+      const html = editor?.innerHTML || "";
 
       return {
         title: jiraTitle,
         url: location.href,
-        bodyText: document.body.innerText
-          .replace(/\s+/g, " ")
-          .trim()
-          .substring(0, 30000),
+        html,
       };
     },
   });
@@ -446,16 +481,7 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
       project: { key: projectKey },
       summary,
       issuetype: { name: "Task" },
-      description: {
-        type: "doc",
-        version: 1,
-        content: [
-          {
-            type: "paragraph",
-            content: [{ type: "text", text: description }],
-          },
-        ],
-      },
+      description,
     },
   };
 
