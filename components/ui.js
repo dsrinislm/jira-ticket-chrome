@@ -13,6 +13,35 @@ export const jiraBaseUrlInput = el("jiraBaseUrl");
 export const jiraBaseUrlError = el("jiraBaseUrlError");
 export const projectKeyInput = el("projectKey");
 export const createTicketBtn = el("createTicket");
+export const sourceSiteSwitch = el("sourceSiteSwitch");
+export const sourceSiteInput = el("sourceSiteInput");
+export const sourceSiteLabels = document.querySelectorAll(".site-toggle-label");
+
+export function getSourceSite() {
+  return sourceSiteInput.checked ? "Spark" : "Octane";
+}
+
+export function setSourceSite(site) {
+  sourceSiteInput.checked = site === "Spark";
+  sourceSiteLabels.forEach((label) =>
+    label.classList.toggle("active", label.dataset.site === site),
+  );
+}
+
+// When the active tab fully matches a site, the source can't be switched
+// manually — disable the toggle and its labels.
+export function setSourceSiteLocked(locked) {
+  sourceSiteInput.disabled = locked;
+  sourceSiteLabels.forEach((label) => (label.disabled = locked));
+  document.querySelector(".site-toggle")?.classList.toggle("locked", locked);
+}
+
+// Hide the source-site section entirely when no site is detected on the tab.
+export function setSourceSiteVisible(visible) {
+  sourceSiteSwitch
+    .closest(".field-block")
+    ?.classList.toggle("hidden", !visible);
+}
 export const projectTagsContainer = el("projectTags");
 export const singleView = el("singleView");
 export const bulkView = el("bulkView");

@@ -16,7 +16,7 @@
       <img src="./icons/icon128.png" alt="" />
     </div>
     <div class="header-text">
-      <p class="eyebrow">Octane&nbsp;→&nbsp;Jira</p>
+      <p class="eyebrow">QA&nbsp;Site&nbsp;→&nbsp;Jira</p>
       <h1>Ticket Creator</h1>
     </div>
   </header>
@@ -40,7 +40,7 @@
 
   <div class="tabs" role="tablist">
     <button id="tabSingle" class="tab-btn active" type="button" role="tab" aria-selected="true" data-view="single">
-      Import Octane Ticket
+      Import Current Ticket
     </button>
     <button id="tabBulk" class="tab-btn" type="button" role="tab" aria-selected="false" data-view="bulk">
       Bulk Import
@@ -49,6 +49,21 @@
 
   <!-- Single-ticket view -->
   <div id="singleView" class="view">
+    <section class="field-block">
+      <span class="field-label" id="sourceSiteLabel">
+        <svg class="field-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M3.5 12h17M12 3.5c2.2 2.3 3.3 5 3.3 8.5s-1.1 6.2-3.3 8.5c-2.2-2.3-3.3-5-3.3-8.5S9.8 5.8 12 3.5Z" stroke="currentColor" stroke-width="1.8"/></svg>
+        Source site
+      </span>
+      <div class="site-toggle">
+        <button type="button" class="site-toggle-label active" data-site="Octane">Octane</button>
+        <label class="switch" id="sourceSiteSwitch">
+          <input type="checkbox" id="sourceSiteInput" class="switch-input" aria-labelledby="sourceSiteLabel" />
+          <span class="switch-track"><span class="switch-thumb"></span></span>
+        </label>
+        <button type="button" class="site-toggle-label" data-site="Spark">Spark</button>
+      </div>
+    </section>
+
     <div class="button-group">
       <button id="createTicket" type="button">
         <span class="btn-spinner" aria-hidden="true"></span>

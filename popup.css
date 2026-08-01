@@ -50,9 +50,20 @@
   box-sizing: border-box;
 }
 
+html {
+  /* The popup document never scrolls. body below is the scroll container
+     at a fixed height, so its scrollbar (and reserved gutter) is always
+     present in every view — switching between single and bulk import never
+     changes the content width. */
+  overflow: hidden;
+}
+
 body {
   width: 380px;
   min-height: 480px;
+  max-height: 600px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: 18px;
   font-family: var(--font-ui);
   color: var(--text);
@@ -177,6 +188,104 @@ body {
 #jiraBaseUrl.invalid {
   border-color: var(--danger);
   background: var(--danger-50);
+}
+
+.site-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.site-toggle-label {
+  padding: 6px 2px;
+  border: none;
+  background: none;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-align: center;
+  transition: color 0.15s ease;
+}
+
+.site-toggle-label:hover {
+  color: var(--text);
+}
+
+.site-toggle-label.active {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.site-toggle.locked {
+  opacity: 0.65;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.site-toggle.locked .site-toggle-label,
+.site-toggle.locked .switch {
+  cursor: not-allowed;
+}
+
+.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 46px;
+  height: 26px;
+  cursor: pointer;
+}
+
+.switch-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switch-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--border-strong);
+  box-shadow: inset 0 1px 2px rgba(20, 21, 39, 0.08);
+  pointer-events: none;
+  transition: background-color 0.18s ease;
+}
+
+.switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow:
+    0 1px 2px rgba(20, 21, 39, 0.2),
+    0 0 0 0.5px rgba(20, 21, 39, 0.06);
+  transform: translateX(0);
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.switch-input:checked + .switch-track {
+  background: var(--accent);
+}
+
+.switch-input:checked + .switch-track .switch-thumb {
+  transform: translateX(20px);
+}
+
+.switch-input:focus-visible + .switch-track {
+  box-shadow: inset 0 1px 2px rgba(20, 21, 39, 0.08), 0 0 0 4px var(--accent-50);
 }
 
 #jiraBaseUrl.invalid:focus,
@@ -672,6 +781,7 @@ button:disabled {
 .table-wrap {
   max-height: 300px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   margin-bottom: 16px;

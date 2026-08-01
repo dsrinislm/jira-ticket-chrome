@@ -10,6 +10,12 @@ import {
   bulkView,
   createTicketBtn,
   ticketResult,
+  sourceSiteInput,
+  sourceSiteLabels,
+  getSourceSite,
+  setSourceSite,
+  setSourceSiteLocked,
+  setSourceSiteVisible,
   setStatus,
   setBusy,
   setBulkBusy,
@@ -41,8 +47,8 @@ import {
   findExistingJiraIssue,
   uploadJiraAttachment,
   updateJiraIssueDescription,
-  getPageData,
 } from "./components/api.js";
+import { getPageData, detectSiteInTab } from "./components/scrape.js";
 import { handleFileSelected, downloadPreviewReport } from "./components/excel.js";
 import {
   loadInitialState,
@@ -90,6 +96,39 @@ projectKeyInput.addEventListener("input", debouncedSaveSettings);
   }),
 );
 createTicketBtn.addEventListener("click", createTicket);
+
+sourceSiteInput.addEventListener("change", () => {
+  setSourceSite(getSourceSite());
+  debouncedSaveSettings();
+});
+
+sourceSiteLabels.forEach((label) =>
+  label.addEventListener("click", () => {
+    setSourceSite(label.dataset.site);
+    debouncedSaveSettings();
+  }),
+);
+
+// Auto-select the source site from the active tab's DOM. When a site's
+// selectors fully match, the toggle is set and locked; when nothing matches
+// (or detection fails) the source-site section is hidden entirely.
+async function applyDetectedSite() {
+  try {
+    const detected = await detectSiteInTab();
+    const matched = detected !== null;
+    setSourceSiteVisible(matched);
+    setSourceSiteLocked(matched);
+    if (matched) setSourceSite(detected);
+  } catch {
+    setSourceSiteVisible(false);
+  }
+}
+
+applyDetectedSite();
+chrome.tabs.onActivated.addListener(() => applyDetectedSite());
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "complete") applyDetectedSite();
+});
 
 async function runBulkImport() {
   const ctx = getJiraContext();
@@ -238,14 +277,20 @@ async function createTicket() {
 
     let pageData;
     try {
-      pageData = await getPageData();
+      pageData = await getPageData(getSourceSite());
     } catch {
       pageData = null;
     }
 
-    if (!pageData?.octaneID) {
+    if (!pageData?.title) {
+      // Distinguish "this tab isn't a QA site" from "a QA site is open but
+      // doesn't match the selected source".
+      const detected = await detectSiteInTab().catch(() => null);
+
       setStatus(
-        "Open the Octane ticket details page and try again.",
+        detected
+          ? `Open the ${detected} ticket details page and try again.`
+          : "Goto ticket details page",
         "error",
       );
       return;
@@ -316,11 +361,12 @@ async function createTicket() {
         try {
           const blob = dataUrlToBlob(img.dataUrl);
           const ext = (blob.type.split("/")[1] || "png").split("+")[0];
+          const filename = img.name || `${img.placeholder}.${ext}`;
           const attachment = await uploadJiraAttachment(
             jiraOrigin,
             issue.key,
             blob,
-            `${img.placeholder}.${ext}`,
+            filename,
           );
           byPlaceholder[img.placeholder] = fileMediaNode(attachment);
         } catch (err) {

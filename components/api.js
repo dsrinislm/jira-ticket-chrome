@@ -183,91 +183,6 @@ async function updateJiraIssueDescription(jiraBaseUrl, issueKey, contentNodes) {
     throw new Error(`Attaching images failed (status ${response.status}).`);
 }
 
-async function getCurrentTab() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tabs.length) throw new Error("No active tab found.");
-  return tabs[0];
-}
-
-async function getPageData() {
-  const currentTab = await getCurrentTab();
-
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: currentTab.id },
-    func: async () => {
-      const octaneID = String(
-        document.querySelector(
-          ".entity-form-document-view-header-entity-id-container",
-        )?.textContent ?? "",
-      )
-        .replace(/\s+/g, " ")
-        .trim();
-      const title =
-        document
-          .querySelector(".entity-form-document-view-header-name-field-container")
-          ?.textContent.replace(/\s+/g, " ")
-          .trim() ||
-        document.querySelector(
-          ".document-view-header-entity-name--custom-label input",
-        )?.value ||
-        "";
-
-      const jiraTitle = ["OCTANE", octaneID, title]
-        .filter(Boolean)
-        .join(" | ");
-
-      const editor = document.querySelector(".fr-element");
-      const images = [];
-      let html = "";
-
-      if (editor) {
-        // Work on a clone so we never touch the live editor content.
-        const container = editor.cloneNode(true);
-        const imgEls = Array.from(container.querySelectorAll("img"));
-
-        for (let i = 0; i < imgEls.length; i++) {
-          const imgEl = imgEls[i];
-          const placeholder = `__JIRA_IMG_${i}__`;
-
-          try {
-            // imgEl.src is the browser-resolved absolute URL (resolved
-            // against THIS page's origin), and this fetch runs with the
-            // page's own cookies — so it works even for relative paths
-            // and authenticated Octane attachment URLs.
-            const response = await fetch(imgEl.src, { credentials: "include" });
-            const blob = await response.blob();
-            const dataUrl = await new Promise((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(reader.result);
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-            });
-
-            images.push({ placeholder, dataUrl });
-            imgEl.replaceWith(document.createTextNode(placeholder));
-          } catch {
-            // Couldn't fetch this one — drop it rather than aborting
-            // the whole capture.
-            imgEl.remove();
-          }
-        }
-
-        html = container.innerHTML;
-      }
-
-      return {
-        title: jiraTitle,
-        octaneID,
-        url: location.href,
-        html,
-        images,
-      };
-    },
-  });
-
-  return results[0].result;
-}
-
 export {
   jiraFetch,
   isJiraLoggedIn,
@@ -276,6 +191,4 @@ export {
   createJiraIssue,
   uploadJiraAttachment,
   updateJiraIssueDescription,
-  getCurrentTab,
-  getPageData,
 };
