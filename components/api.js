@@ -67,13 +67,11 @@ function escapeJqlString(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-// Jira deprecated GET /rest/api/3/search in favor of the enhanced
-// JQL search endpoint — use that here.
-async function findExistingJiraIssue(jiraBaseUrl, projectKey, summary) {
-  const jql = `project = "${escapeJqlString(projectKey)}" AND summary ~ "${escapeJqlString(summary)}"`;
-
+async function searchByJql(jiraBaseUrl, jql, matches) {
   let response;
   try {
+    // Jira deprecated GET /rest/api/3/search in favor of the enhanced
+    // JQL search endpoint — use that here.
     response = await jiraFetch(jiraBaseUrl, "/rest/api/3/search/jql", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -86,12 +84,52 @@ async function findExistingJiraIssue(jiraBaseUrl, projectKey, summary) {
   if (!response.ok) return { error: true, issue: null };
 
   const data = await response.json();
-  const target = summary.trim().toLowerCase();
-  const match = (data.issues || []).find(
-    (issue) => issue.fields?.summary?.trim().toLowerCase() === target,
+  const match = (data.issues || []).find((issue) =>
+    matches(issue.fields?.summary),
   );
 
   return { error: false, issue: match || null };
+}
+
+// Duplicate detection. Single-ticket titles are "SITE | ID | description";
+// the ID is the stable dedup key — the description part can drift between
+// imports (e.g. a Spark ticket's short description edited in the meantime),
+// which is why exact-title-only matching re-created Spark tickets.
+//
+// Strategy: exact summary match first; if the title is site-prefixed, also
+// search by the source ID and accept an issue that carries both the site
+// and the ID in its summary.
+async function findExistingJiraIssue(jiraBaseUrl, projectKey, summary) {
+  const target = String(summary ?? "").trim();
+  if (!target) return { error: false, issue: null };
+
+  const projectJql = `project = "${escapeJqlString(projectKey)}"`;
+  const lower = target.toLowerCase();
+
+  const exact = await searchByJql(
+    jiraBaseUrl,
+    `${projectJql} AND summary = "${escapeJqlString(target)}"`,
+    (s) => String(s ?? "").trim().toLowerCase() === lower,
+  );
+  if (exact.issue) return exact;
+
+  const prefixed = /^([A-Z]+) \| ([A-Z0-9][A-Z0-9._-]*) \|/i.exec(target);
+  if (prefixed) {
+    const siteToken = prefixed[1].toUpperCase();
+    const id = prefixed[2].toUpperCase();
+
+    const byId = await searchByJql(
+      jiraBaseUrl,
+      `${projectJql} AND summary ~ "${escapeJqlString(id)}"`,
+      (s) => {
+        const upper = String(s ?? "").toUpperCase();
+        return upper.includes(siteToken) && upper.includes(id);
+      },
+    );
+    if (byId.issue || byId.error) return byId;
+  }
+
+  return exact;
 }
 
 async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {

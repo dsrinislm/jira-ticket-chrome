@@ -51,20 +51,15 @@
 }
 
 html {
-  /* The popup document never scrolls. body below is the scroll container
-     at a fixed height, so its scrollbar (and reserved gutter) is always
-     present in every view — switching between single and bulk import never
-     changes the content width. */
   overflow: hidden;
 }
 
 body {
-  width: 380px;
+  width: 460px;
   min-height: 480px;
   max-height: 600px;
   overflow-y: auto;
-  scrollbar-gutter: stable;
-  padding: 18px;
+  padding: 16px;
   font-family: var(--font-ui);
   color: var(--text);
   background: var(--bg);
@@ -77,7 +72,7 @@ body {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .mark {
@@ -122,8 +117,8 @@ body {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 16px;
-  margin-bottom: 14px;
+  padding: 13px 14px;
+  margin-bottom: 12px;
   box-shadow: var(--shadow-xs);
 }
 
@@ -131,7 +126,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 7px;
+  margin-bottom: 6px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.01em;
@@ -145,6 +140,30 @@ body {
   flex-shrink: 0;
 }
 
+.field-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.field-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.field-col-url {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.field-col-project {
+  flex: 0 0 106px;
+}
+
+.field-col .field-label {
+  margin-bottom: 6px;
+}
+
 #jiraBaseUrl,
 #projectKey {
   width: 100%;
@@ -155,15 +174,10 @@ body {
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text);
-  margin-bottom: 12px;
+  margin-bottom: 0;
   outline: none;
   background: var(--surface-muted);
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
-}
-
-#jiraBaseUrl:last-of-type,
-#projectKey:last-of-type {
-  margin-bottom: 0;
 }
 
 #jiraBaseUrl::placeholder,
@@ -302,20 +316,27 @@ body {
   line-height: 1.4;
 }
 
+/* Both views share this minimum height so switching between the single
+   and bulk tabs never resizes the popup at initial load. Content (ticket
+   result, preview, status messages) can still grow the popup beyond this. */
+.view {
+  min-height: 165px;
+}
+
 /* Recent Project Tags */
 
 .project-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 .project-tag {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 6px 6px 11px;
+  padding: 5px 5px 5px 10px;
   background: var(--surface-muted);
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -361,7 +382,7 @@ body {
 .button-group {
   display: flex;
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 .button-group:last-child {
@@ -469,8 +490,9 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 12px 14px;
-  margin-bottom: 14px;
+  min-height: 42px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -556,7 +578,7 @@ button:disabled {
 /* Result Section */
 
 #ticketResult {
-  max-height: 300px;
+  max-height: 220px;
   overflow-y: auto;
 }
 
@@ -635,7 +657,7 @@ button:disabled {
   display: flex;
   gap: 4px;
   padding: 4px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
   background: var(--surface-muted);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -673,8 +695,8 @@ button:disabled {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  padding: 22px 14px;
+  gap: 2px;
+  padding: 13px 14px;
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius-md);
   background: var(--surface-muted);
@@ -708,9 +730,9 @@ button:disabled {
 }
 
 .dropzone-icon {
-  width: 22px;
-  height: 22px;
-  margin-bottom: 5px;
+  width: 20px;
+  height: 20px;
+  margin-bottom: 2px;
   color: var(--accent);
 }
 
@@ -779,12 +801,11 @@ button:disabled {
 }
 
 .table-wrap {
-  max-height: 300px;
+  max-height: 260px;
   overflow-y: auto;
-  scrollbar-gutter: stable;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 table {
@@ -931,8 +952,8 @@ tbody tr:last-child td {
 /* Import progress */
 
 .progress {
-  margin-bottom: 16px;
-  padding: 12px 14px;
+  margin-bottom: 12px;
+  padding: 10px 14px;
   background: var(--surface-muted);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);

@@ -61,6 +61,7 @@ import {
   validateJiraBaseUrlField,
   debouncedValidateBulkProjectKey,
   getJiraContext,
+  extractJiraIssueDetailsFromBaseUrl,
 } from "./components/validation.js";
 
 // The script loads at the end of <body>, so the DOM is already parsed —
@@ -79,6 +80,7 @@ exportBtn.addEventListener("click", downloadPreviewReport);
 jiraBaseUrlInput.addEventListener("input", () => {
   // Never introduce a new error while typing — only clear one that's
   // already showing, the moment the value becomes valid again.
+  extractJiraIssueDetailsFromBaseUrl();
   enforceJiraBaseUrlNoPath();
   clearJiraBaseUrlErrorIfNowValid();
   debouncedSaveSettings();
@@ -326,6 +328,11 @@ async function createTicket() {
       projectKey,
       finalSummary,
     );
+
+    if (existing.error) {
+      setStatus("Couldn't check for an existing ticket. Try again.", "error");
+      return;
+    }
 
     if (existing.issue) {
       const issueUrl = `${jiraOrigin}/browse/${existing.issue.key}`;

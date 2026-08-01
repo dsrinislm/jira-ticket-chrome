@@ -41,6 +41,61 @@ export function enforceJiraBaseUrlNoPath() {
   }
 }
 
+// Recognizes Jira URLs that identify a project and splits them into the
+// base URL (origin) and the project key
+// Returns null when the value isn't a recognizable Jira URL.
+export function parseJiraIssueUrl(value) {
+  const value_ = (value || "").trim();
+  if (!value_) return null;
+
+  let url;
+  try {
+    url = new URL(value_);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "https:") return null;
+
+  // /browse/<KEY>-<NUM> — query/hash are ignored (they live outside
+  // pathname). Keys start with an uppercase letter and are 2+ chars.
+  const browse = /^\/browse\/([A-Z][A-Z0-9]{1,})-(\d+)\/?$/i.exec(
+    url.pathname,
+  );
+  if (browse) {
+    return {
+      origin: url.origin,
+      projectKey: browse[1].toUpperCase(),
+    };
+  }
+
+  // Board URLs — any path ending in /projects/<KEY>/boards/<id>
+  const board = /\/projects\/([A-Z][A-Z0-9]+)\/boards\/\d+\/?$/i.exec(
+    url.pathname,
+  );
+  if (board) {
+    return {
+      origin: url.origin,
+      projectKey: board[1].toUpperCase(),
+    };
+  }
+
+  return null;
+}
+
+// If the base URL field holds a Jira issue URL, split it into the base
+// URL (origin) and the project key. Returns true when it extracted.
+export function extractJiraIssueDetailsFromBaseUrl() {
+  const parsed = parseJiraIssueUrl(jiraBaseUrlInput.value);
+  if (!parsed) return false;
+
+  jiraBaseUrlInput.value = parsed.origin;
+  if (projectKeyInput.value !== parsed.projectKey) {
+    projectKeyInput.value = parsed.projectKey;
+  }
+  return true;
+}
+
 /**
  * Validates that a string is a plausible Jira base URL:
  * - parses as an absolute URL

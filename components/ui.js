@@ -137,7 +137,7 @@ export function updateBulkStatusMessage() {
 export function resetDropzone() {
   dropzone.dataset.loaded = "false";
   dropzoneTitle.textContent = "Choose an Excel file";
-  dropzoneHint.textContent = 'Excel files · "ID", "Name" and "Description" columns required';
+  dropzoneHint.textContent = "Needs ID, Name and Description columns";
 }
 
 export function updateSelectionCount() {
