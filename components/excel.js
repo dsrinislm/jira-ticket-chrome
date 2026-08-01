@@ -5,13 +5,13 @@ import {
   previewSection,
   progressSection,
   exportBtn,
-  dropzone,
-  dropzoneTitle,
   dropzoneHint,
   fileSummary,
   setStatus,
+  setDropzoneLoaded,
   resetDropzone,
   loadBulkRows,
+  unlockBulkImport,
 } from "./ui.js";
 import { validateBulkProjectKey } from "./validation.js";
 import { loadExcelJS, parseSheetRows, buildReport } from "./xlsx.js";
@@ -23,11 +23,11 @@ export function handleFileSelected() {
   progressSection.style.display = "none";
   exportBtn.style.display = "none";
   state.bulkRows = [];
+  unlockBulkImport();
 
   if (!file) return;
 
-  dropzone.dataset.loaded = "true";
-  dropzoneTitle.textContent = file.name;
+  setDropzoneLoaded();
   dropzoneHint.textContent = "Reading file…";
 
   const reader = new FileReader();
@@ -43,17 +43,17 @@ export function handleFileSelected() {
       const sheet = workbook.worksheets[0];
       const parsed = parseSheetRows(sheet);
 
-      if (!parsed.length) {
+      if (!parsed.rows.length) {
         resetDropzone();
         fileError.textContent =
-          'No usable rows found — check for "ID", "Name", and "Description" columns.';
+          'No usable rows found — expected "ID"/"Name"/"Description" (Octane) or "Number"/"Short description"/"Description" (Spark) columns.';
         fileError.style.display = "block";
         return;
       }
 
-      loadBulkRows(parsed);
-      dropzoneHint.textContent = "Click to choose a different file";
-      fileSummary.textContent = `${parsed.length} row(s) loaded.`;
+      loadBulkRows(parsed.rows, parsed.site);
+      dropzoneHint.textContent = "Click to import a different report";
+      fileSummary.textContent = `${parsed.rows.length} row(s) loaded.`;
       setStatus("Select the tickets to import.", "info");
       validateBulkProjectKey();
     } catch (err) {

@@ -493,6 +493,20 @@ button:disabled {
   background: var(--accent-50);
 }
 
+/* The export CTA is tinted with the theme accent so it stands out as the
+   final action once an import finishes. */
+#exportBtn {
+  background: var(--accent-50);
+  border-color: var(--accent-100);
+  color: var(--accent-strong);
+}
+
+#exportBtn:hover {
+  background: var(--accent-100);
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+
 .btn-spinner {
   display: none;
   width: 15px;
@@ -733,7 +747,7 @@ button:disabled {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 2px;
+  gap: 5px;
   padding: 13px 14px;
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius-md);
@@ -767,10 +781,17 @@ button:disabled {
   pointer-events: none;
 }
 
+.dropzone-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+
 .dropzone-icon {
-  width: 20px;
-  height: 20px;
-  margin-bottom: 2px;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
   color: var(--accent);
 }
 
@@ -798,10 +819,7 @@ button:disabled {
 }
 
 .file-dropzone[data-loaded="true"] .dropzone-title {
-  font-family: var(--font-mono);
-  font-size: 12px;
   color: var(--text);
-  word-break: break-all;
 }
 
 #bulkView .field-error {
@@ -839,7 +857,7 @@ button:disabled {
 }
 
 .table-wrap {
-  max-height: 260px;
+  height: 150px;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -882,17 +900,56 @@ tbody tr:last-child td {
 }
 
 .row-title {
+  max-width: 190px;
   font-weight: 600;
   color: var(--text);
   font-size: 12px;
 }
 
 .row-desc {
+  max-width: 230px;
   color: var(--text-secondary);
-  max-width: 74px;
+}
+
+/* Truncates a cell's text to 3 lines; a per-row "more" toggle removes the
+   clamp so the rest of the content is readable inside the scroll area. */
+.clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.clamped.expanded {
+  -webkit-line-clamp: unset;
+  display: block;
+}
+
+.row-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 3px;
+  padding: 0;
+  border: none;
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  height: auto;
+  flex: none;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.row-toggle:hover {
+  color: var(--accent-strong);
+  text-decoration: underline;
 }
 
 .row-id {
@@ -951,6 +1008,16 @@ tbody tr:last-child td {
   text-decoration: underline;
 }
 
+/* Rows that were created or already existed after an import: hoisted to the
+   top of the preview with a locked checkbox. */
+.row-done .col-check {
+  opacity: 0.5;
+}
+
+.row-done .col-check input {
+  cursor: not-allowed;
+}
+
 .btn-primary {
   width: 100%;
   height: 44px;
@@ -1003,6 +1070,44 @@ tbody tr:last-child td {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.progress-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.abort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: none;
+  color: var(--danger);
+  font-size: 11.5px;
+  font-weight: 600;
+  flex: none;
+  cursor: pointer;
+}
+
+.abort-btn:hover {
+  border-color: rgba(229, 72, 77, 0.4);
+  background: var(--danger-50);
+}
+
+.abort-btn .btn-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.abort-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .progress-label {

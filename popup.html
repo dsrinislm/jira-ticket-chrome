@@ -47,7 +47,7 @@
 
   <div class="tabs" role="tablist">
     <button id="tabSingle" class="tab-btn active" type="button" role="tab" aria-selected="true" data-view="single">
-      Import Current Ticket
+      Current Ticket
     </button>
     <button id="tabBulk" class="tab-btn" type="button" role="tab" aria-selected="false" data-view="bulk">
       Bulk Import
@@ -93,15 +93,17 @@
   <div id="bulkView" class="view" hidden>
     <section class="field-block">
       <label class="field-label" for="fileInput">
-        <svg class="field-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        Excel file
+        <svg class="field-icon" viewBox="0 0 1024 1024" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M 25,628 L 27,626 L 27,620 L 33,608 L 37,604 L 39,598 L 55,576 L 57,570 L 77,542 L 79,536 L 95,514 L 97,508 L 117,480 L 119,474 L 139,446 L 141,440 L 157,418 L 159,412 L 163,408 L 163,406 L 167,402 L 175,388 L 190,375 L 198,371 L 202,371 L 204,369 L 210,369 L 212,367 L 286,367 L 290,369 L 293,374 L 293,384 L 289,388 L 289,390 L 273,412 L 271,418 L 243,458 L 241,464 L 217,498 L 215,504 L 187,544 L 185,550 L 157,590 L 155,596 L 143,612 L 141,618 L 144,621 L 316,621 L 318,623 L 322,623 L 327,630 L 327,644 L 329,646 L 329,656 L 331,658 L 333,674 L 335,676 L 337,686 L 341,692 L 341,696 L 349,712 L 353,716 L 355,722 L 365,734 L 365,736 L 396,767 L 398,767 L 404,773 L 416,779 L 420,783 L 432,789 L 436,789 L 446,795 L 450,795 L 458,799 L 464,799 L 466,801 L 472,801 L 474,803 L 484,803 L 486,805 L 536,805 L 538,803 L 546,803 L 548,801 L 556,801 L 564,797 L 570,797 L 590,787 L 594,787 L 598,783 L 608,779 L 612,775 L 620,771 L 651,742 L 651,740 L 665,724 L 685,684 L 685,680 L 689,672 L 689,666 L 691,664 L 691,656 L 693,654 L 695,630 L 700,623 L 704,623 L 706,621 L 879,620 L 881,616 L 879,612 L 867,596 L 865,590 L 845,562 L 843,556 L 819,522 L 817,516 L 797,488 L 795,482 L 771,448 L 769,442 L 765,438 L 765,436 L 761,432 L 761,430 L 749,414 L 747,408 L 743,404 L 743,402 L 729,382 L 729,374 L 734,367 L 814,367 L 816,369 L 820,369 L 832,375 L 849,390 L 849,392 L 861,408 L 863,414 L 879,436 L 881,442 L 897,464 L 899,470 L 915,492 L 917,498 L 933,520 L 935,526 L 951,548 L 953,554 L 965,570 L 967,576 L 983,598 L 985,604 L 989,608 L 995,620 L 995,626 L 997,628 L 997,918 L 995,920 L 993,930 L 980,947 L 978,947 L 972,953 L 964,957 L 960,957 L 958,959 L 946,959 L 944,961 L 78,961 L 76,959 L 64,959 L 62,957 L 58,957 L 50,953 L 37,942 L 37,940 L 29,930 L 29,926 L 25,918 L 25,630 ZM 359,434 L 361,432 L 363,424 L 372,417 L 378,417 L 380,415 L 433,414 L 433,72 L 435,68 L 442,63 L 582,63 L 591,74 L 591,414 L 642,415 L 644,417 L 650,417 L 661,426 L 661,430 L 663,432 L 663,442 L 661,446 L 651,458 L 651,460 L 643,468 L 643,470 L 635,478 L 635,480 L 629,486 L 629,488 L 613,506 L 613,508 L 607,514 L 607,516 L 583,544 L 583,546 L 577,552 L 577,554 L 561,572 L 561,574 L 555,580 L 555,582 L 531,610 L 531,612 L 522,621 L 518,623 L 506,623 L 495,616 L 495,614 L 487,606 L 487,604 L 481,598 L 481,596 L 457,568 L 457,566 L 443,550 L 443,548 L 435,540 L 435,538 L 429,532 L 429,530 L 413,512 L 413,510 L 407,504 L 407,502 L 383,474 L 383,472 L 377,466 L 377,464 L 363,448 L 359,436 Z"/></svg>
+        Import Tickets
       </label>
 
-      <label class="file-dropzone" for="fileInput">
+      <label class="file-dropzone" for="fileInput" aria-label="Import Tickets">
         <input id="fileInput" type="file" accept=".xlsx,.xlsm,.xltx,.xltm,.xls" />
-        <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span id="dropzoneTitle" class="dropzone-title">Choose an Excel file</span>
-        <span id="dropzoneHint" class="dropzone-hint">Needs ID, Name and Description columns</span>
+        <div class="dropzone-main">
+          <svg id="dropzoneIcon" class="dropzone-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M4 9.5h16M9.5 4v16M14.5 9.5V20" stroke="currentColor" stroke-width="1.8"/></svg>
+          <span id="dropzoneTitle" class="dropzone-title">Choose an Excel file</span>
+        </div>
+        <span id="dropzoneHint" class="dropzone-hint">Octane: ID/Name/Description<br/>Spark: Number/Short description/Description</span>
       </label>
 
       <p id="fileError" class="field-error" role="alert" style="display: none;"></p>
@@ -135,7 +137,13 @@
       <div id="progressSection" class="progress" role="progressbar" aria-label="Import progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="display: none;">
         <div class="progress-head">
           <span id="progressLabel" class="progress-label">Importing tickets…</span>
-          <span id="progressPercent" class="progress-percent">0%</span>
+          <div class="progress-actions">
+            <span id="progressPercent" class="progress-percent">0%</span>
+            <button id="abortImportBtn" class="abort-btn" type="button" style="display: none;">
+              <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
+              Stop
+            </button>
+          </div>
         </div>
         <div class="progress-track">
           <div id="progressBar" class="progress-bar"></div>

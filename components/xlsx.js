@@ -20,28 +20,38 @@ export async function loadExcelJS() {
   return exceljsPromise;
 }
 
-// Reads a cell's display text plus its hyperlink target. The URL falls
-// back to the display text when the cell isn't linked. Pass the row object
-// so the sheet's row map isn't re-resolved for every cell.
+// Reads a cell's display text plus its hyperlink target. `linked` tells
+// callers whether the cell really holds a hyperlink (vs a plain value) —
+// needed so a Spark "Number" cell only becomes a source URL when it's
+// actually clickable. `url` falls back to the display text for the Octane
+// ID flow, which has always relied on it.
 export function readCell(row, colIdx) {
-  if (colIdx < 0) return { text: "", url: "" };
+  if (colIdx < 0) return { text: "", url: "", linked: false };
   const cell = row.getCell(colIdx + 1);
   const text = String(cell.text ?? "").trim();
-  const url = String(cell.hyperlink ?? "").trim();
-  return { text, url: url || text };
+  const rawUrl = String(cell.hyperlink ?? "").trim();
+  return { text, url: rawUrl || text, linked: Boolean(rawUrl) };
 }
 
 // Reads rows from the first worksheet as
-// { name, description, sourceUrl, idText, rowIndex }. Columns are matched by
-// header (case-insensitive, substring-tolerant) so variations like "Name",
-// "ID", "Id", "Description" all work. For the ID column we keep both the
-// display text (what the cell shows) and the hyperlink URL, since linked
-// cells store the real address in cell.hyperlink while the cell.text holds
-// the displayed value.
+// { site, rows: [{ name, description, sourceUrl, idText, rowIndex }] }.
+//
+// Two schemas are supported, detected from the header row:
+//  - Octane: "ID" / "Name" / "Description"
+//  - Spark:  "Number" / "Short description" / "Description", with a
+//    combined "Comments and Work notes" column appended to the issue body
+//
+// Columns are matched by header (case-insensitive, substring-tolerant,
+// underscores treated as spaces). For the ID/Number column we keep both
+// the display text and the hyperlink URL, since linked cells store the
+// real address in cell.hyperlink while cell.text holds the displayed value.
 export function parseSheetRows(worksheet) {
   const headers = [];
   worksheet.getRow(1).eachCell({ includeEmpty: true }, (cell, colNumber) => {
-    headers[colNumber - 1] = String(cell.text).trim().toLowerCase();
+    headers[colNumber - 1] = String(cell.text)
+      .trim()
+      .toLowerCase()
+      .replace(/_/g, " ");
   });
 
   const findCol = (needle) => {
@@ -50,27 +60,76 @@ export function parseSheetRows(worksheet) {
     return headers.findIndex((h) => h.includes(needle));
   };
 
-  const nameIdx = findCol("name");
-  const descIdx = findCol("description");
-  const idIdx = findCol("id");
-  if (nameIdx < 0 || descIdx < 0 || idIdx < 0) return [];
+  const readText = (row, idx) =>
+    idx < 0 ? "" : String(row.getCell(idx + 1).text ?? "").trim();
 
-  const parsed = [];
-  for (let r = 2; r <= worksheet.actualRowCount; r++) {
-    const row = worksheet.getRow(r);
-    const name = String(row.getCell(nameIdx + 1).text ?? "").trim();
-    if (!name) continue;
+  const numberIdx = findCol("number");
+  const shortIdx = findCol("short description");
+  let descIdx = findCol("description");
+  // "Short description" also matches a bare "description" search — a file
+  // needs a distinct Description column, not just the short one.
+  if (descIdx === shortIdx) descIdx = -1;
 
-    const idCell = readCell(row, idIdx);
-    parsed.push({
-      rowIndex: r - 1,
-      name,
-      description: String(row.getCell(descIdx + 1).text ?? "").trim(),
-      sourceUrl: idCell.url,
-      idText: idCell.text,
-    });
+  // Spark: Number / Short description / Description (+ "Comments and Work
+  // notes" single column). Tolerates separate Comments/Work notes columns
+  // as a fallback for older exports.
+  if (numberIdx >= 0 && shortIdx >= 0 && descIdx >= 0) {
+    const notesIdx = findCol("comments and work notes");
+    const commentsIdx = findCol("comments");
+    const workNotesIdx = findCol("work notes");
+    const parsed = [];
+    for (let r = 2; r <= worksheet.actualRowCount; r++) {
+      const row = worksheet.getRow(r);
+      const name = readText(row, shortIdx);
+      if (!name) continue;
+      const idCell = readCell(row, numberIdx);
+      const desc = readText(row, descIdx);
+      const notes =
+        readText(row, notesIdx) ||
+        [commentsIdx, workNotesIdx]
+          .map((idx) => readText(row, idx))
+          .filter(Boolean)
+          .join("\n\n");
+      const description = [
+        desc,
+        notes && `COMMENTS AND WORK NOTES\n${notes}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      parsed.push({
+        rowIndex: r - 1,
+        name,
+        description,
+        // Source URL only when the Number cell is actually a clickable link.
+        sourceUrl: idCell.linked ? idCell.url : "",
+        idText: idCell.text,
+      });
+    }
+    return { site: "Spark", rows: parsed };
   }
-  return parsed;
+
+  // Octane: ID / Name / Description
+  const nameIdx = findCol("name");
+  const idIdx = findCol("id");
+  if (idIdx >= 0 && nameIdx >= 0 && descIdx >= 0) {
+    const parsed = [];
+    for (let r = 2; r <= worksheet.actualRowCount; r++) {
+      const row = worksheet.getRow(r);
+      const name = readText(row, nameIdx);
+      if (!name) continue;
+      const idCell = readCell(row, idIdx);
+      parsed.push({
+        rowIndex: r - 1,
+        name,
+        description: readText(row, descIdx),
+        sourceUrl: idCell.url,
+        idText: idCell.text,
+      });
+    }
+    return { site: "Octane", rows: parsed };
+  }
+
+  return { site: null, rows: [] };
 }
 
 // Turns the imported workbook into the download report, in place:

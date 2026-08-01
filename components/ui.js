@@ -57,15 +57,18 @@ export const fileSummary = el("fileSummary");
 export const previewSection = el("previewSection");
 export const previewBody = el("previewBody");
 export const selectAllCheckbox = el("selectAllCheckbox");
+export const selectAllLabel = document.querySelector(".select-all");
 export const selectionCount = el("selectionCount");
 export const importBtn = el("importBtn");
 export const dropzone = document.querySelector(".file-dropzone");
 export const dropzoneTitle = el("dropzoneTitle");
 export const dropzoneHint = el("dropzoneHint");
+export const dropzoneIcon = el("dropzoneIcon");
 export const progressSection = el("progressSection");
 export const progressLabel = el("progressLabel");
 export const progressPercent = el("progressPercent");
 export const progressBar = el("progressBar");
+export const abortImportBtn = el("abortImportBtn");
 
 // Shared mutable state across modules.
 export const state = {
@@ -103,6 +106,20 @@ export function setBusy(isBusy) {
   projectKeyInput.disabled = isBusy;
 }
 
+// When every row in the uploaded file has been created or already existed,
+// the import CTA is hidden entirely — all work is done. If anything is
+// still selectable (failed or unprocessed rows), it stays visible so the
+// user can retry just those.
+export function lockBulkImport() {
+  importBtn.classList.add("hidden");
+}
+
+export function unlockBulkImport() {
+  importBtn.classList.remove("hidden");
+  importBtn.disabled = false;
+  importBtn.dataset.loading = "false";
+}
+
 export function setBulkBusy(isBusy) {
   importBtn.disabled = isBusy;
   importBtn.dataset.loading = isBusy ? "true" : "false";
@@ -132,31 +149,88 @@ export function updateBulkStatusMessage() {
     jiraBaseUrlInput.value.trim() && projectKeyInput.value.trim();
   setStatus(
     jiraConfigured
-      ? "Upload octane report"
+      ? "Upload Octane or Spark report"
       : "Configure Jira details and create a ticket.",
     "info",
   );
 }
 
+const DROPZONE_ICON_EXCEL =
+  '<rect x="4" y="4" width="16" height="16" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M4 9.5h16M9.5 4v16M14.5 9.5V20" stroke="currentColor" stroke-width="1.8"/>';
+const DROPZONE_ICON_CHECK =
+  '<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="m8.5 12 2.5 2.5 4.5-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>';
+
+export function setDropzoneLoaded() {
+  dropzone.dataset.loaded = "true";
+  dropzoneTitle.textContent = "Upload Done";
+  dropzoneIcon.innerHTML = DROPZONE_ICON_CHECK;
+}
+
 export function resetDropzone() {
   dropzone.dataset.loaded = "false";
   dropzoneTitle.textContent = "Choose an Excel file";
-  dropzoneHint.textContent = "Needs ID, Name and Description columns";
+  dropzoneIcon.innerHTML = DROPZONE_ICON_EXCEL;
+  dropzoneHint.innerHTML =
+    "Octane: ID/Name/Description<br/>Spark: Number/Short description/Description";
 }
 
 export function updateSelectionCount() {
-  const selected = state.bulkRows.filter((r) => r.checkbox.checked).length;
-  selectionCount.textContent = `${selected} of ${state.bulkRows.length} selected`;
+  const selected = state.bulkRows.filter(
+    (r) => !r.checkbox.disabled && r.checkbox.checked,
+  ).length;
+  const processed = state.bulkRows.filter((r) =>
+    ["created", "exists", "error"].includes(r.statusEl.dataset.state),
+  ).length;
+
+  if (selected === 0) {
+    selectionCount.textContent = "";
+    return;
+  }
+
+  const processedLabel = processed > 0 ? `Processed ${processed}, ` : "";
+  selectionCount.textContent = `${processedLabel}Selected ${selected} of ${state.bulkRows.length}`;
 }
 
 export function toggleSelectAll() {
-  state.bulkRows.forEach((r) => (r.checkbox.checked = selectAllCheckbox.checked));
+  state.bulkRows.forEach((r) => {
+    if (!r.checkbox.disabled) r.checkbox.checked = selectAllCheckbox.checked;
+  });
+  updateSelectionCount();
+}
+
+// After an import, hoist rows that were created or already existed to the
+// top of the preview and lock their checkboxes so they can't be re-imported.
+export function reorderBulkRowsAfterImport() {
+  const isDone = (r) =>
+    r.statusEl.dataset.state === "created" || r.statusEl.dataset.state === "exists";
+
+  const done = [];
+  const rest = [];
+  state.bulkRows.forEach((r) => (isDone(r) ? done : rest).push(r));
+  state.bulkRows = [...done, ...rest];
+
+  const fragment = document.createDocumentFragment();
+  state.bulkRows.forEach((r) => {
+    if (isDone(r)) {
+      r.checkbox.disabled = true;
+      r.checkbox.checked = true;
+      r.tr.classList.add("row-done");
+    }
+    fragment.appendChild(r.tr);
+  });
+  previewBody.appendChild(fragment);
+
+  // With every row finished, the select-all toggle has nothing left to do.
+  const allDone = state.bulkRows.every(isDone);
+  selectAllLabel?.classList.toggle("hidden", allDone);
+
   updateSelectionCount();
 }
 
 export function setRowStatus(row, rowState, html) {
   row.statusEl.dataset.state = rowState;
   row.statusEl.innerHTML = html;
+  updateSelectionCount();
 }
 
 export function updateProgress(completed, total, label) {
@@ -217,14 +291,55 @@ export function redirectToLogin(jiraBaseUrl, projectKey) {
   );
 }
 
-export function loadBulkRows(parsed) {
+// Builds a table cell whose text is clamped to 3 lines with a per-row
+// "more"/"less" toggle for the overflow. The toggle stays hidden until the
+// text actually overflows (measured once layout settles).
+function createClampedCell(text, className) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "clamp-cell";
+
+  const span = document.createElement("span");
+  span.className = `clamped ${className}`;
+  span.textContent = text || "—";
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "row-toggle";
+  toggle.textContent = "more";
+  toggle.style.display = "none";
+  toggle.addEventListener("click", () => {
+    const expanded = span.classList.toggle("expanded");
+    wrapper.classList.toggle("expanded", expanded);
+    toggle.textContent = expanded ? "less" : "more";
+  });
+
+  wrapper.append(span, toggle);
+  return wrapper;
+}
+
+// After the preview renders, hide the "more" toggle on any cell whose text
+// already fits within the 3-line clamp.
+function updateClampToggles() {
+  requestAnimationFrame(() => {
+    document.querySelectorAll(".clamp-cell").forEach((cell) => {
+      const span = cell.querySelector(".clamped");
+      const toggle = cell.querySelector(".row-toggle");
+      if (!span || !toggle) return;
+      const overflows = span.scrollHeight > span.clientHeight + 1;
+      toggle.style.display = overflows ? "inline-flex" : "none";
+    });
+  });
+}
+
+export function loadBulkRows(rows, site = "Octane") {
   previewBody.innerHTML = "";
   state.bulkRows = [];
 
+  const siteTag = String(site || "Octane").toUpperCase();
   const fragment = document.createDocumentFragment();
 
-  parsed.forEach((record) => {
-    const titleParts = ["OCTANE", record.idText, record.name].filter(Boolean);
+  rows.forEach((record) => {
+    const titleParts = [siteTag, record.idText, record.name].filter(Boolean);
     const title = titleParts.join(" | ");
     const tr = document.createElement("tr");
 
@@ -253,15 +368,10 @@ export function loadBulkRows(parsed) {
     }
 
     const titleTd = document.createElement("td");
-    const titleSpan = document.createElement("span");
-    titleSpan.className = "row-title";
-    titleSpan.textContent = title;
-    titleTd.appendChild(titleSpan);
+    titleTd.appendChild(createClampedCell(title, "row-title"));
 
     const descTd = document.createElement("td");
-    descTd.className = "row-desc";
-    descTd.title = record.description;
-    descTd.textContent = record.description.slice(0, 100) || "—";
+    descTd.appendChild(createClampedCell(record.description, "row-desc"));
 
     const statusTd = document.createElement("td");
     statusTd.className = "row-status";
@@ -280,10 +390,13 @@ export function loadBulkRows(parsed) {
       idText: record.idText,
       checkbox,
       statusEl: statusTd,
+      tr,
     });
   });
 
   previewBody.appendChild(fragment);
   previewSection.style.display = "block";
+  selectAllLabel?.classList.remove("hidden");
   updateSelectionCount();
+  updateClampToggles();
 }

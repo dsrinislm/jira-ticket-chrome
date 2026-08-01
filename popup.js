@@ -27,6 +27,10 @@ import {
   updateProgress,
   renderTicketCard,
   progressSection,
+  abortImportBtn,
+  lockBulkImport,
+  unlockBulkImport,
+  reorderBulkRowsAfterImport,
   state,
   escapeHtml,
   showLoginButton,
@@ -110,7 +114,7 @@ function promptCreateTicketWhenReady() {
     setStatus("Configure Jira details and create a ticket.", "info");
     return;
   }
-  setStatus("All set - Import current ticket into JIRA", "info");
+  setStatus("All set - Export current ticket into JIRA", "info");
 }
 
 // On input we only ever clear the nudge — never introduce it mid-typing.
@@ -133,6 +137,16 @@ function resetSinglePromptIfIncomplete() {
   }),
 );
 createTicketBtn.addEventListener("click", createTicket);
+
+// Lets the user stop an in-flight bulk import. Picked up by the worker
+// pool between rows, so the current row's Jira calls finish first.
+let abortRequested = false;
+
+abortImportBtn.addEventListener("click", () => {
+  abortRequested = true;
+  abortImportBtn.disabled = true;
+  setStatus("Stopping import after the current ticket…", "info");
+});
 
 sourceSiteInput.addEventListener("change", () => {
   setSourceSite(getSourceSite());
@@ -171,7 +185,9 @@ async function runBulkImport() {
   const ctx = getJiraContext();
   if (!ctx) return;
 
-  const selectedRows = state.bulkRows.filter((r) => r.checkbox.checked);
+  const selectedRows = state.bulkRows.filter(
+    (r) => r.checkbox.checked && !r.checkbox.disabled,
+  );
   if (!selectedRows.length) {
     setStatus("Select at least one row to import.", "error");
     return;
@@ -183,6 +199,10 @@ async function runBulkImport() {
   hideLoginButtons();
   exportBtn.style.display = "none";
   setBulkBusy(true);
+
+  abortRequested = false;
+  abortImportBtn.disabled = false;
+  abortImportBtn.style.display = "inline-flex";
 
   try {
     setStatus("Checking Jira session...", "loading");
@@ -221,6 +241,7 @@ async function runBulkImport() {
     let completed = 0;
 
     const processRow = async (row) => {
+      if (abortRequested) return;
       setStatus(
         `Processing ${completed + 1} of ${selectedRows.length}...`,
         "loading",
@@ -268,11 +289,11 @@ async function runBulkImport() {
 
       completed++;
       updateProgress(completed, selectedRows.length);
-      await sleep(250);
+      if (!abortRequested) await sleep(250);
     };
 
     const worker = async () => {
-      while (nextRow < selectedRows.length) {
+      while (nextRow < selectedRows.length && !abortRequested) {
         await processRow(selectedRows[nextRow++]);
       }
     };
@@ -286,6 +307,31 @@ async function runBulkImport() {
 
     updateProgress(selectedRows.length, selectedRows.length, "Import complete");
 
+    // Finished rows move to the top with their checkboxes disabled. The
+    // import CTA stays visible while anything is still selectable (failed
+    // or unprocessed rows) and is hidden only when every row is done.
+    reorderBulkRowsAfterImport();
+
+    const selectableRemain = state.bulkRows.some(
+      (r) =>
+        r.statusEl.dataset.state !== "created" &&
+        r.statusEl.dataset.state !== "exists",
+    );
+    if (selectableRemain) {
+      unlockBulkImport();
+    } else {
+      lockBulkImport();
+    }
+
+    if (abortRequested) {
+      updateProgress(completed, selectedRows.length, "Import stopped");
+      setStatus(
+        `Stopped. ${created} created, ${skipped} already existed, ${failed} failed.`,
+        failed ? "error" : "info",
+      );
+      return;
+    }
+
     if (created > 0 || skipped > 0) saveProjectHistory(projectKey);
     exportBtn.style.display = "block";
 
@@ -294,6 +340,7 @@ async function runBulkImport() {
       failed ? "error" : "success",
     );
   } finally {
+    abortImportBtn.style.display = "none";
     setBulkBusy(false);
   }
 }
