@@ -6,6 +6,7 @@ const el = (id) => document.getElementById(id);
 export const statusDiv = el("status");
 export const statusText = el("statusText");
 export const ticketResult = el("ticketResult");
+export const gapArt = el("gapArt");
 export const loginBtn = el("openWebsite");
 export const bulkLoginBtn = el("bulkLoginBtn");
 export const exportBtn = el("exportBtn");
@@ -36,11 +37,14 @@ export function setSourceSiteLocked(locked) {
   document.querySelector(".site-toggle")?.classList.toggle("locked", locked);
 }
 
-// Hide the source-site section entirely when no site is detected on the tab.
+// Hide the source-site section entirely when no site is detected on the tab;
+// the gap left behind is where the decorative canvas lives, so it flips the
+// other way.
 export function setSourceSiteVisible(visible) {
   sourceSiteSwitch
     .closest(".field-block")
     ?.classList.toggle("hidden", !visible);
+  gapArt?.classList.toggle("hidden", visible);
 }
 export const projectTagsContainer = el("projectTags");
 export const singleView = el("singleView");

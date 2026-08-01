@@ -49,6 +49,7 @@ import {
   updateJiraIssueDescription,
 } from "./components/api.js";
 import { getPageData, detectSiteInTab } from "./components/scrape.js";
+import { startGapArt } from "./components/gap-art.js";
 import { handleFileSelected, downloadPreviewReport } from "./components/excel.js";
 import {
   loadInitialState,
@@ -69,6 +70,7 @@ import {
 const debouncedSaveSettings = debounce(saveSettings, 300);
 
 loadInitialState();
+startGapArt();
 
 tabSingle.addEventListener("click", () => switchView("single"));
 tabBulk.addEventListener("click", () => switchView("bulk"));
@@ -77,21 +79,54 @@ fileInput.addEventListener("change", handleFileSelected);
 importBtn.addEventListener("click", runBulkImport);
 exportBtn.addEventListener("click", downloadPreviewReport);
 
-jiraBaseUrlInput.addEventListener("input", () => {
+jiraBaseUrlInput.addEventListener("input", (e) => {
   // Never introduce a new error while typing — only clear one that's
   // already showing, the moment the value becomes valid again.
-  extractJiraIssueDetailsFromBaseUrl();
+  // A pasted issue/board URL fills the base URL and project key in one
+  // go — hand focus straight to the create-ticket CTA so the user can
+  // submit without reaching for the button.
+  const extracted = extractJiraIssueDetailsFromBaseUrl();
   enforceJiraBaseUrlNoPath();
   clearJiraBaseUrlErrorIfNowValid();
   debouncedSaveSettings();
+  if (extracted && e.inputType === "insertFromPaste") {
+    createTicketBtn.focus();
+  }
 });
 
-jiraBaseUrlInput.addEventListener("blur", validateJiraBaseUrlField);
+jiraBaseUrlInput.addEventListener("blur", () => {
+  const result = validateJiraBaseUrlField();
+  if (result?.valid) promptCreateTicketWhenReady();
+});
+projectKeyInput.addEventListener("blur", promptCreateTicketWhenReady);
 projectKeyInput.addEventListener("input", debouncedSaveSettings);
+
+// Once both Jira fields are filled (focus is out), swap the idle status
+// message for a nudge toward the create-ticket CTA. Cleared back to the
+// idle message whenever either field stops being filled.
+function promptCreateTicketWhenReady() {
+  if (!bulkView.hidden) return;
+  if (!jiraBaseUrlInput.value.trim() || !projectKeyInput.value.trim()) {
+    setStatus("Configure Jira details and create a ticket.", "info");
+    return;
+  }
+  setStatus("All set - Import current ticket into JIRA", "info");
+}
+
+// On input we only ever clear the nudge — never introduce it mid-typing.
+// The ready message itself appears once focus leaves a fully-filled field.
+function resetSinglePromptIfIncomplete() {
+  if (!bulkView.hidden) return;
+  if (!jiraBaseUrlInput.value.trim() || !projectKeyInput.value.trim()) {
+    setStatus("Configure Jira details and create a ticket.", "info");
+  }
+}
 
 [jiraBaseUrlInput, projectKeyInput].forEach((input) =>
   input.addEventListener("input", () => {
-    if (!bulkView.hidden) {
+    if (bulkView.hidden) {
+      resetSinglePromptIfIncomplete();
+    } else {
       updateBulkStatusMessage();
       debouncedValidateBulkProjectKey();
     }
