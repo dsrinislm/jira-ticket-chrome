@@ -140,8 +140,17 @@ export function switchView(view) {
   if (isBulk) {
     updateBulkStatusMessage();
   } else {
-    setStatus("Configure Jira details and create a ticket.", "info");
+    const jiraConfigured =
+      jiraBaseUrlInput.value.trim() && projectKeyInput.value.trim();
+    setStatus(
+      jiraConfigured
+        ? "All set - Export current ticket into JIRA"
+        : "Configure Jira details and create a ticket.",
+      "info",
+    );
   }
+
+  (isBulk ? tabBulk : tabSingle)?.focus?.({ preventScroll: true });
 }
 
 export function updateBulkStatusMessage() {
@@ -184,11 +193,23 @@ export function updateSelectionCount() {
 
   if (selected === 0) {
     selectionCount.textContent = "";
-    return;
+  } else {
+    const processedLabel = processed > 0 ? `Processed ${processed}, ` : "";
+    selectionCount.textContent = `${processedLabel}Selected ${selected} of ${state.bulkRows.length}`;
   }
 
-  const processedLabel = processed > 0 ? `Processed ${processed}, ` : "";
-  selectionCount.textContent = `${processedLabel}Selected ${selected} of ${state.bulkRows.length}`;
+  // While an import is running the progress messages win; only refresh the
+  // resting-state prompt when the user is free to tweak the selection.
+  if (!state.bulkRows.length || importBtn.disabled) return;
+
+  const selectable = state.bulkRows.filter((r) => !r.checkbox.disabled).length;
+  if (selectable === 0) {
+    setStatus("Bulk import done! try different report", "success");
+  } else if (selected > 0) {
+    setStatus("All set - Export selected tickets into JIRA", "info");
+  } else {
+    setStatus("Select the tickets to import.", "info");
+  }
 }
 
 export function toggleSelectAll() {
@@ -399,4 +420,71 @@ export function loadBulkRows(rows, site = "Octane") {
   selectAllLabel?.classList.remove("hidden");
   updateSelectionCount();
   updateClampToggles();
+
+  // The freshly populated preview can push the import CTA and the status
+  // message below the fold; glide all the way down so the whole status bar is
+  // in view, then land focus on the action the user is ready to take.
+  const revealImport = () => {
+    smoothScrollToBottom();
+    const focusTarget = importBtn.disabled ? selectAllCheckbox : importBtn;
+    focusTarget?.focus?.({ preventScroll: true });
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(revealImport);
+  } else {
+    revealImport();
+  }
+}
+
+// Glides the popup's vertical scroll to `target` (a document-body scroll
+// position) with a gentle ease-out curve, so the animation feels deliberate
+// rather than a snap. The target is clamped to the scrollable range.
+function smoothScrollTo(target, duration = 420) {
+  const scroller = document.body;
+  if (
+    !scroller ||
+    typeof scroller.scrollTop !== "number" ||
+    typeof scroller.scrollHeight !== "number"
+  ) {
+    return;
+  }
+  const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+  if (!(maxScroll > 0)) return;
+
+  const start = scroller.scrollTop;
+  const distance = Math.min(Math.max(0, target), maxScroll) - start;
+  if (!distance) return;
+
+  const startTime = performance.now();
+  const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+  const step = (now) => {
+    const progress = Math.min(1, (now - startTime) / duration);
+    scroller.scrollTop = start + distance * easeOutCubic(progress);
+    if (progress < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+// Glides the popup to its very bottom (past the status bar).
+function smoothScrollToBottom() {
+  const scroller = document.body;
+  if (!scroller || typeof scroller.scrollTop !== "number") return;
+  smoothScrollTo(scroller.scrollHeight - scroller.clientHeight);
+}
+
+// Glides the popup so `el`'s top edge sits at the top of the viewport. When
+// the content above would push the bottom out of reach, it clamps so the
+// status bar stays visible.
+export function smoothScrollToElement(el, duration = 420) {
+  const scroller = document.body;
+  if (
+    !el ||
+    !scroller ||
+    typeof scroller.scrollTop !== "number" ||
+    typeof scroller.scrollHeight !== "number"
+  ) {
+    return;
+  }
+  const elTop = el.getBoundingClientRect().top + scroller.scrollTop;
+  smoothScrollTo(elTop, duration);
 }

@@ -35,6 +35,7 @@ import {
   escapeHtml,
   showLoginButton,
   redirectToLogin,
+  smoothScrollToElement,
 } from "./components/ui.js";
 import { debounce, sleep } from "./components/util.js";
 import {
@@ -335,13 +336,30 @@ async function runBulkImport() {
     if (created > 0 || skipped > 0) saveProjectHistory(projectKey);
     exportBtn.style.display = "block";
 
-    setStatus(
-      `Done. ${created} created, ${skipped} already existed, ${failed} failed.`,
-      failed ? "error" : "success",
-    );
+    if (selectableRemain) {
+      setStatus(
+        `Done. ${created} created, ${skipped} already existed, ${failed} failed.`,
+        failed ? "error" : "success",
+      );
+    } else {
+      setStatus("Bulk import done! try different report", "success");
+    }
   } finally {
     abortImportBtn.style.display = "none";
     setBulkBusy(false);
+
+    // The layout (buttons, status) has settled by now — glide back so the
+    // whole bulk view is framed from its top edge, with the result status
+    // still readable at the bottom of the viewport.
+    const frameBulkView = () => {
+      if (bulkView.hidden) return;
+      smoothScrollToElement(bulkView);
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(frameBulkView);
+    } else {
+      frameBulkView();
+    }
   }
 }
 

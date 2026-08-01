@@ -626,6 +626,31 @@ button:disabled {
   }
 }
 
+/* Entrance for the preview when a report is loaded: a short fade-and-rise
+   with a springy deceleration so the upload feels deliberate. The animation
+   re-runs each time the section toggles from display:none to display:block. */
+#previewSection {
+  animation: preview-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes preview-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #previewSection {
+    animation: none;
+  }
+}
+
 /* Result Section */
 
 #ticketResult {

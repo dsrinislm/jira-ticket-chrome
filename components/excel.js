@@ -52,9 +52,8 @@ export function handleFileSelected() {
       }
 
       loadBulkRows(parsed.rows, parsed.site);
-      dropzoneHint.textContent = "Click to import a different report";
+      dropzoneHint.textContent = "Click to select a different report";
       fileSummary.textContent = `${parsed.rows.length} row(s) loaded.`;
-      setStatus("Select the tickets to import.", "info");
       validateBulkProjectKey();
     } catch (err) {
       resetDropzone();
