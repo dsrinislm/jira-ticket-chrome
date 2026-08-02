@@ -268,35 +268,89 @@ const FILE_TYPE_BY_EXT = {
   txt: "text/plain",
 };
 
-async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename) {
+// The attachment upload uses XHR instead of fetch because fetch can't report
+// upload progress — XHR's upload.onprogress can. Same auth model (cookies via
+// withCredentials + X-Atlassian-Token) and the same single network-level retry
+// as fetchWithRetry; the browser sets the multipart boundary for the FormData.
+// `onProgress(loaded, total)` is called with the request's cumulative bytes,
+// and `onXhr(xhr)` hands the live XHR to the caller so it can be aborted
+// (e.g. by the sync progress bar's Stop button).
+function xhrUpload(url, blob, filename, onProgress, onXhr) {
+  return new Promise((resolve, reject) => {
+    const formData = new FormData();
+    formData.append("file", blob, filename);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.setRequestHeader("X-Atlassian-Token", "no-check");
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable && onProgress) onProgress(e.loaded, e.total);
+    });
+    if (onXhr) onXhr(xhr);
+    xhr.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        // Non-JSON body — e.g. a gateway error page behind the 401/413.
+      }
+      resolve({
+        ok: xhr.status >= 200 && xhr.status < 300,
+        status: xhr.status,
+        data,
+      });
+    };
+    xhr.onerror = () => reject(new TypeError("Network error"));
+    xhr.onabort = () => reject(new DOMException("Aborted", "AbortError"));
+    xhr.send(formData);
+  });
+}
+
+async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename, onProgress, onXhr) {
   const ext = (String(filename).split(".").pop() || "").toLowerCase();
   const wantedType = FILE_TYPE_BY_EXT[ext];
   if (wantedType && (!blob.type || blob.type === "application/octet-stream")) {
     blob = new Blob([blob], { type: wantedType });
   }
 
-  const formData = new FormData();
-  formData.append("file", blob, filename);
+  const url = `${jiraBaseUrl}/rest/api/3/issue/${issueKey}/attachments`;
 
-  const response = await fetchWithRetry(
-    `${jiraBaseUrl}/rest/api/3/issue/${issueKey}/attachments`,
-    {
-      method: "POST",
-      credentials: "include",
-      headers: {
-        Accept: "application/json",
-        "X-Atlassian-Token": "no-check",
-        // No Content-Type — the browser must set the multipart boundary itself.
-      },
-      body: formData,
-    },
-    { retryStatus: false },
-  );
+  let response;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      response = await xhrUpload(url, blob, filename, onProgress, onXhr);
+      break;
+    } catch (err) {
+      // A Stop click aborts the request — never retry a user-initiated cancel.
+      if (err.name === "AbortError") throw err;
+      if (attempt === 0) {
+        await sleep(300 + Math.random() * 200);
+        continue;
+      }
+      throw err.name === "TypeError"
+        ? new Error("Network error — check your connection and try again.")
+        : err;
+    }
+  }
 
-  if (!response.ok)
+  if (!response.ok) {
+    if (response.status === 401) {
+      // Not a session problem — the session was already validated and small
+      // files upload fine. Atlassian's edge proxy rejects large request
+      // bodies (roughly above 25-30 MB) with 401 instead of 413; the Jira
+      // Cloud UI is the only path that accepts them.
+      throw new Error(
+        "Jira Cloud rejected the upload (401): Atlassian's gateway refuses attachments over ~25-30 MB via the API. Upload this file from the Jira UI, or split/compress it.",
+      );
+    }
     throw new Error(`Image upload failed (status ${response.status}).`);
-  const data = await response.json();
-  return data[0]; // { id, filename, ... }
+  }
+  if (!Array.isArray(response.data) || !response.data[0]) {
+    throw new Error("Image upload returned an unexpected response.");
+  }
+  return response.data[0]; // { id, filename, ... }
 }
 
 async function updateJiraIssueDescription(jiraBaseUrl, issueKey, contentNodes) {

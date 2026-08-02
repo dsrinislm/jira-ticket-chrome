@@ -79,7 +79,6 @@
           Include attachments
         </span>
       </label>
-      <p class="attach-toggle-hint">Upload the ticket's files to the Jira issue. Leave off for a faster export.</p>
       <div id="attachmentPicker" class="attachment-picker" hidden>
         <div class="attachment-picker-header">
           <span class="attachment-picker-title">Choose attachments to upload</span>
@@ -88,6 +87,7 @@
             Select all
           </label>
         </div>
+        <div id="attachmentNote" class="attachment-note" hidden></div>
         <div id="attachmentGroups" class="attachment-groups"></div>
       </div>
     </section>
@@ -106,6 +106,22 @@
     </div>
 
     <div id="ticketResult"></div>
+
+    <div id="syncProgressSection" class="progress" role="progressbar" aria-label="Attachment upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" style="display: none;">
+      <div class="progress-head">
+        <span id="syncProgressLabel" class="progress-label">Uploading attachments…</span>
+        <div class="progress-actions">
+          <span id="syncProgressPercent" class="progress-percent">0%</span>
+          <button id="syncAbortBtn" class="abort-btn" type="button">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
+            Stop
+          </button>
+        </div>
+      </div>
+      <div class="progress-track">
+        <div id="syncProgressBar" class="progress-bar"></div>
+      </div>
+    </div>
 
     <canvas id="gapArt" class="gap-art" aria-hidden="true"></canvas>
   </div>

@@ -228,10 +228,14 @@ export async function scrapeInPage(site, options = {}) {
     // attachment; the optional picker selection narrows which files to take.
     if (includeAttachments) {
       const query = `owner_work_item EQ {id EQ ${itemId}}`;
+      // Request the same explicit field set the picker uses — Octane's
+      // default attachment fields aren't guaranteed to include `name`, and
+      // without it every file is dropped by the `kept` filter below.
+      const fields = "id,name,description,client_lock_stamp,size,exists";
       let attachments = [];
       try {
         const listResponse = await fetch(
-          `${apiBase}/attachments?query=${encodeURIComponent(`"${query}"`)}`,
+          `${apiBase}/attachments?fields=${encodeURIComponent(fields)}&query=${encodeURIComponent(`"${query}"`)}`,
           { credentials: "include" },
         );
         if (listResponse.ok) {
@@ -486,7 +490,8 @@ export async function scrapeInPage(site, options = {}) {
 // WITHOUT fetching the file bytes. This cheap metadata pass feeds the popup's
 // attachment picker, so the user picks which files to upload before the slow
 // byte-by-byte capture ever runs. Octane lists through the REST API (no DOM);
-// Spark reads its attachment-list markup.
+// Spark reads its attachment-list markup and resolves each file's byte size
+// through the ServiceNow sys_attachment Table API.
 export async function listTicketAttachmentsInPage(site) {
   const VIDEO_EXTS = new Set([
     "mp4", "m4v", "mov", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg",
@@ -498,6 +503,22 @@ export async function listTicketAttachmentsInPage(site) {
   const sizeOf = (container) => {
     const m = /([\d.]+\s*(?:KB|MB|GB))/i.exec(container.textContent || "");
     return m ? m[1] : "";
+  };
+
+  // Formats API-reported byte sizes into the picker's human-readable label.
+  const formatFileSize = (bytes) => {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n < 0) return "";
+    if (n < 1024) return `${n} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let size = n;
+    let unit = "B";
+    for (const u of units) {
+      size /= 1024;
+      unit = u;
+      if (size < 1024) break;
+    }
+    return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
   };
 
   const typeOf = (container, name) => {
@@ -559,22 +580,8 @@ export async function listTicketAttachmentsInPage(site) {
       return [];
     }
 
-    // The API reports byte sizes, so format them once here for the picker.
-    const formatFileSize = (bytes) => {
-      const n = Number(bytes);
-      if (!Number.isFinite(n) || n < 0) return "";
-      if (n < 1024) return `${n} B`;
-      const units = ["KB", "MB", "GB", "TB"];
-      let size = n;
-      let unit = "B";
-      for (const u of units) {
-        size /= 1024;
-        unit = u;
-        if (size < 1024) break;
-      }
-      return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
-    };
-
+    // The API reports byte sizes, so they flow straight through to the picker
+    // (formatFileSize renders the label; sizeBytes feeds the upload cutoff).
     return data
       .filter(
         (att) =>
@@ -604,6 +611,51 @@ export async function listTicketAttachmentsInPage(site) {
       });
   }
 
+  // Spark: the attachment-list markup shows sizes only as human-readable
+  // labels ("1.2 MB"), which the picker can't turn into byte math for the
+  // upload cutoff. Ask the ServiceNow Table API for this incident's
+  // sys_attachment size_bytes (same endpoint the details page's attachment
+  // section is driven from) and match rows back to the DOM by file name.
+  // Falls back to the DOM label when the API can't be reached — no sys_id in
+  // the URL, a non-ServiceNow frame, an API error, or a name the API doesn't
+  // report.
+  let sparkSizesByName = null;
+  if (site.name === "Spark") {
+    const searchMatch = /[?&]sys_id=([^&]+)/.exec(location.search || "");
+    const hashMatch = /sys_id=([^&]+)/.exec(location.href.split("#")[1] || "");
+    const sysId = (searchMatch && searchMatch[1]) || (hashMatch && hashMatch[1]);
+    if (sysId) {
+      const userToken =
+        (typeof window !== "undefined" && window.g_ck) ||
+        document.querySelector('meta[name="X-UserToken"]')?.content ||
+        document.querySelector('input[name="X-UserToken"]')?.value ||
+        "";
+      const headers = { Accept: "application/json" };
+      if (userToken) headers["X-UserToken"] = userToken;
+      try {
+        const response = await fetch(
+          `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(sysId)}&sysparm_fields=file_name,size_bytes&sysparm_display_value=false&sysparm_limit=1000`,
+          { credentials: "include", headers },
+        );
+        if (response.ok) {
+          const json = await response.json();
+          const rows = Array.isArray(json?.result) ? json.result : [];
+          const byName = new Map();
+          for (const row of rows) {
+            const name = String(row?.file_name || "").trim();
+            const bytes = Number(row?.size_bytes);
+            if (name && Number.isFinite(bytes) && bytes >= 0) {
+              byName.set(name, bytes);
+            }
+          }
+          if (byName.size) sparkSizesByName = byName;
+        }
+      } catch {
+        sparkSizesByName = null;
+      }
+    }
+  }
+
   const items = [];
 
   if (site.attachmentSelector) {
@@ -613,11 +665,13 @@ export async function listTicketAttachmentsInPage(site) {
       const href = container.getAttribute?.("href");
       const name = (container.textContent || "").trim();
       if (!href || !name) continue;
+      const sizeBytes = sparkSizesByName ? sparkSizesByName.get(name) ?? null : null;
       items.push({
         name,
         url: new URL(href, location.href).href,
         type: typeOf(container, name),
-        size: sizeOf(container),
+        size: sizeBytes != null ? formatFileSize(sizeBytes) : sizeOf(container),
+        sizeBytes,
       });
     }
   }
@@ -636,6 +690,12 @@ export async function listTicketAttachmentsInTab(siteName) {
     target: { tabId: currentTab.id, allFrames: true },
     func: listTicketAttachmentsInPage,
     args: [site],
+    // Spark sizes come from the ServiceNow Table API, which only authenticates
+    // when the request is issued from the page's own context (MAIN world) —
+    // an isolated-world native fetch gets a 401 Basic challenge and Chrome
+    // then shows the Basic-auth dialog, which JS can't suppress. Octane's
+    // cookie-only API works fine from the isolated world.
+    world: siteName === "Spark" ? "MAIN" : "ISOLATED",
   });
 
   // Prefer the frame that actually found attachments, then any result.

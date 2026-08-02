@@ -5,6 +5,7 @@ import {
   getSourceSite,
   projectTagsContainer,
   escapeHtml,
+  refreshSingleViewStatus,
 } from "./ui.js";
 
 // Single round trip to storage on popup open instead of two separate
@@ -20,6 +21,10 @@ export function loadInitialState() {
       // field yet, so this only takes effect after blur.
 
       renderProjectHistory(data.projectHistory || []);
+
+      // Restored fields may change the idle status: a stale "Configure Jira
+      // details…" must not linger once saved details are loaded.
+      refreshSingleViewStatus();
 
       // Accessibility: when no Jira details are configured yet, land focus on
       // the Base URL field so keyboard / screen-reader users start on the

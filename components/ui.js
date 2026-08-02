@@ -21,6 +21,7 @@ export const includeAttachmentsInput = el("includeAttachments");
 export const attachmentPicker = el("attachmentPicker");
 export const attachmentGroups = el("attachmentGroups");
 export const attachmentSelectAll = el("attachmentSelectAll");
+export const attachmentNote = el("attachmentNote");
 
 export function getIncludeAttachments() {
   return includeAttachmentsInput.checked;
@@ -41,14 +42,63 @@ export function getSelectedAttachments() {
 export function setAttachmentPickerLoading() {
   attachmentPicker.hidden = false;
   attachmentGroups.innerHTML = "";
+  setAttachmentNote("");
   state.attachmentSelection = null;
 }
 
 export function clearAttachmentPicker() {
   attachmentPicker.hidden = true;
   attachmentGroups.innerHTML = "";
+  setAttachmentNote("");
   attachmentSelectAll.checked = true;
   state.attachmentSelection = null;
+}
+
+// Jira Cloud's gateway rejects attachment uploads above ~25 MB with a 401
+// (documented Atlassian bug JRACLOUD-75756), so the picker never lists files
+// over this size — attempting them would only fail at upload time. The cutoff
+// is 26 MB, not 25, because a 25 MB file can round up past the byte math and
+// upload fine; only strictly-larger files are reliably rejected.
+export const MAX_ATTACHMENT_UPLOAD_BYTES = 26 * 1024 * 1024;
+
+// Byte size of a picker item: prefers the API-reported sizeBytes and falls
+// back to parsing the formatted size string (listings that couldn't reach an
+// API — e.g. a Spark page with no sys_id — only have the label).
+export function attachmentByteSize(item) {
+  const bytes = Number(item?.sizeBytes);
+  if (Number.isFinite(bytes) && bytes >= 0) return bytes;
+  const m = /([\d.]+)\s*(KB|MB|GB)/i.exec(String(item?.size || ""));
+  if (!m) return 0;
+  const mult =
+    m[2].toUpperCase() === "GB"
+      ? 1024 ** 3
+      : m[2].toUpperCase() === "MB"
+        ? 1024 ** 2
+        : 1024;
+  return Number(m[1]) * mult;
+}
+
+// The picker note ("n files over 25 MB skipped…"); an empty message hides it.
+export function setAttachmentNote(message) {
+  if (!attachmentNote) return;
+  attachmentNote.hidden = !message;
+  attachmentNote.textContent = message || "";
+}
+
+// Refreshes the single-ticket idle status from the Jira fields. Shared by the
+// popup's prompt/input handlers and storage's load so the message never goes
+// stale (e.g. still saying "Configure Jira details…" after details load).
+export function refreshSingleViewStatus() {
+  if (bulkView.hidden) {
+    const configured =
+      jiraBaseUrlInput.value.trim() && projectKeyInput.value.trim();
+    setStatus(
+      configured
+        ? "All set - Export current ticket into JIRA"
+        : "Configure Jira details and create a ticket.",
+      "info",
+    );
+  }
 }
 
 const ATTACHMENT_GROUP_LABELS = { video: "Video", image: "Image", other: "Other" };
@@ -188,6 +238,12 @@ export const progressLabel = el("progressLabel");
 export const progressPercent = el("progressPercent");
 export const progressBar = el("progressBar");
 export const abortImportBtn = el("abortImportBtn");
+
+export const syncProgressSection = el("syncProgressSection");
+export const syncProgressLabel = el("syncProgressLabel");
+export const syncProgressPercent = el("syncProgressPercent");
+export const syncProgressBar = el("syncProgressBar");
+export const syncAbortBtn = el("syncAbortBtn");
 
 // Shared mutable state across modules.
 export const state = {
@@ -449,6 +505,23 @@ export function updateProgress(completed, total, label) {
   progressLabel.textContent = label || `Importing ${completed} of ${total}…`;
 }
 
+// Byte-level upload progress for the single-ticket flow (bulk flows track row
+// counts via updateProgress instead). `loaded`/`total` are bytes; the caller
+// formats the size label (ui.js imports nothing, so bytes stay raw here).
+export function updateSyncProgress(loaded, total, label) {
+  const pct =
+    total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
+  syncProgressBar.style.width = `${pct}%`;
+  syncProgressBar.dataset.done = String(loaded >= total && total > 0);
+  syncProgressPercent.textContent = `${pct}%`;
+  syncProgressSection.setAttribute("aria-valuenow", String(pct));
+  syncProgressLabel.textContent = label || "Uploading attachments…";
+}
+
+export function setSyncProgressVisible(visible) {
+  syncProgressSection.style.display = visible ? "block" : "none";
+}
+
 export function renderTicketCard(issueKey, issueUrl) {
   const safeKey = escapeHtml(issueKey);
   const safeUrl = escapeHtml(issueUrl);
@@ -706,4 +779,31 @@ export function smoothScrollToBottom() {
   const scroller = document.body;
   if (!scroller || typeof scroller.scrollTop !== "number") return;
   smoothScrollTo(Infinity);
+}
+
+// Glides back to the bottom of the popup so the import progress bar and the
+// shared status message are visible. The layout (buttons, status, rows) has
+// settled by the time an import's finally runs, and the glide tracks the
+// live document height, so it reaches the true end even as rows finish.
+export function frameBulkView() {
+  const run = () => {
+    if (bulkView.hidden) return;
+    smoothScrollToBottom();
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(run);
+  } else {
+    run();
+  }
+}
+
+// Glides to the bottom of the popup so the freshly rendered ticket card and
+// the shared status message are in view after a create finishes.
+export function revealStatus() {
+  const run = () => smoothScrollToBottom();
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(run);
+  } else {
+    run();
+  }
 }
