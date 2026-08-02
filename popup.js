@@ -36,6 +36,8 @@ import {
   selectAllLabel,
   listingImportBtn,
   listingImportLabel,
+  setActiveListingSite,
+  getActiveListingSite,
   state,
   escapeHtml,
   showLoginButton,
@@ -63,9 +65,8 @@ import {
   detectSiteInTab,
   scrapeSelectedListingInTab,
   scrapeSelectedSparkListingInTab,
-  detectListingInTab,
+  detectTabState,
   fetchListingDetailsInTab,
-  fetchSparkDetailInTab,
 } from "./components/scrape.js";
 import { startGapArt } from "./components/gap-art.js";
 import { handleFileSelected, downloadPreviewReport } from "./components/excel.js";
@@ -96,7 +97,7 @@ selectAllCheckbox.addEventListener("change", toggleSelectAll);
 fileInput.addEventListener("change", handleFileSelected);
 importBtn.addEventListener("click", runBulkImport);
 listingImportBtn.addEventListener("click", () =>
-  runListingImport(activeListingSite),
+  runListingImport(getActiveListingSite()),
 );
 exportBtn.addEventListener("click", downloadPreviewReport);
 
@@ -104,13 +105,19 @@ jiraBaseUrlInput.addEventListener("input", (e) => {
   // Never introduce a new error while typing — only clear one that's
   // already showing, the moment the value becomes valid again.
   // A pasted issue/board URL fills the base URL and project key in one
-  // go — hand focus straight to the create-ticket CTA so the user can
-  // submit without reaching for the button.
-  const extracted = extractJiraIssueDetailsFromBaseUrl();
+  // go; a plain base URL also works when the key is already filled. In
+  // both cases, once a paste leaves both fields filled, hand focus
+  // straight to the create-ticket CTA so the user can submit without
+  // reaching for the button.
+  extractJiraIssueDetailsFromBaseUrl();
   enforceJiraBaseUrlNoPath();
   clearJiraBaseUrlErrorIfNowValid();
   debouncedSaveSettings();
-  if (extracted && e.inputType === "insertFromPaste") {
+  if (
+    e.inputType === "insertFromPaste" &&
+    jiraBaseUrlInput.value.trim() &&
+    projectKeyInput.value.trim()
+  ) {
     createTicketBtn.focus();
   }
 });
@@ -177,53 +184,120 @@ sourceSiteLabels.forEach((label) =>
   }),
 );
 
-// Auto-select the source site from the active tab's DOM. When a site's
-// selectors fully match, the toggle is set and locked; when nothing matches
-// (or detection fails) the source-site section is hidden entirely.
-async function applyDetectedSite() {
+// Auto-select the source site and show the listing CTA from the active tab's
+// DOM in one all-frames scan. When a site's selectors fully match, the toggle
+// is set and locked; when nothing matches (or detection fails) the source-site
+// section is hidden entirely. The listing CTA only shows when the tab is a
+// supported listing grid, and its label is tailored to the site detected.
+async function applyDetectedState() {
+  let site = null;
+  let listing = null;
   try {
-    const detected = await detectSiteInTab();
-    const matched = detected !== null;
-    setSourceSiteVisible(matched);
-    setSourceSiteLocked(matched);
-    if (matched) setSourceSite(detected);
+    ({ site, listing } = await detectTabState());
   } catch {
     setSourceSiteVisible(false);
+    return;
   }
-}
 
-// Site detected on the active tab's listing, if any. Stored separately so the
-// CTA click handler can pass it explicitly rather than the click event.
-let activeListingSite = null;
+  const matched = site !== null;
+  // Select first so the lock keeps the right site's button enabled.
+  if (matched) setSourceSite(site);
+  setSourceSiteVisible(matched);
+  setSourceSiteLocked(matched);
 
-// Shows the "Import selected from <site> listing" CTA only when the active tab
-// is a listing grid with selectable rows on a supported site, and tailors the
-// label to the site actually detected.
-async function applyListingDetection() {
-  const site = await detectListingInTab().catch(() => null);
-  activeListingSite = site;
-  listingImportLabel.textContent = site
-    ? `Import selected ${site} listing`
+  setActiveListingSite(listing);
+  listingImportLabel.textContent = listing
+    ? `Import selected ${listing} listing`
     : "Import selected listing";
-  listingImportBtn.style.display = site ? "block" : "none";
+  listingImportBtn.style.display = listing ? "block" : "none";
+  if (!bulkView.hidden) updateBulkStatusMessage();
 }
 
-applyDetectedSite();
-// The listing "import from the current page" CTA only makes sense while the
-// active tab shows a listing grid, so show/hide it alongside site detection.
-applyListingDetection();
-chrome.tabs.onActivated.addListener(() => {
-  applyDetectedSite();
-  applyListingDetection();
-});
+applyDetectedState();
+chrome.tabs.onActivated.addListener(applyDetectedState);
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   // Re-evaluate on every URL change too, not just on full page loads —
   // SPA hash navigation can leave the grid DOM behind while still firing url.
   if (changeInfo.status === "complete" || changeInfo.url) {
-    applyDetectedSite();
-    applyListingDetection();
+    applyDetectedState();
   }
 });
+
+function bulkCountsSummary({ created, skipped, failed }) {
+  return `${created} created, ${skipped} already existed, ${failed} failed.`;
+}
+
+// Shared bulk-import pacing: a bounded worker pool over `total` items that
+// updates the progress bar and paces each worker. `runItem(index, counters,
+// progress)` mutates `counters` ({ created, skipped, failed }) and may read
+// `progress.completed` for status text; the pool owns the progress bar and
+// the per-item sleep so both flows stay consistent. Sequential imports take
+// ~2 API calls + 250ms per row, so N rows cost ~2N serial round trips — a
+// small pool keeps that pacing (and Jira's rate limits) intact while cutting
+// wall time by roughly the pool size.
+async function runBulkWorkerPool(total, runItem) {
+  const counters = { created: 0, skipped: 0, failed: 0 };
+  const progress = { completed: 0 };
+  const MAX_CONCURRENT = 4;
+  let next = 0;
+
+  const worker = async () => {
+    while (next < total && !abortRequested) {
+      const index = next++;
+      await runItem(index, counters, progress);
+      progress.completed++;
+      updateProgress(progress.completed, total);
+      if (!abortRequested) await sleep(250);
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(MAX_CONCURRENT, total) }, worker),
+  );
+
+  return { counters, completed: progress.completed };
+}
+
+// Shared bulk-import wrap-up: moves finished rows to the top, disables the
+// CTA when nothing is selectable, saves project history on a full run, and
+// reports the Stopped/Done summary. `doneMessage(selectableRemain, counters)`
+// lets each flow tailor its success copy.
+function finishBulkRun({ total, projectKey, counters, completed, doneMessage }) {
+  updateProgress(total, total, "Import complete");
+
+  reorderBulkRowsAfterImport();
+
+  const selectableRemain = state.bulkRows.some(
+    (r) =>
+      r.statusEl.dataset.state !== "created" &&
+      r.statusEl.dataset.state !== "exists",
+  );
+  if (selectableRemain) {
+    unlockBulkImport();
+  } else {
+    lockBulkImport();
+  }
+
+  if (abortRequested) {
+    updateProgress(completed, total, "Import stopped");
+    setStatus(
+      `Stopped. ${bulkCountsSummary(counters)}`,
+      counters.failed ? "error" : "info",
+    );
+    return;
+  }
+
+  if (counters.created > 0 || counters.skipped > 0) {
+    saveProjectHistory(projectKey);
+  }
+  // The finished preview rows are reportable just like the Excel flow.
+  exportBtn.style.display = "block";
+
+  setStatus(
+    doneMessage(selectableRemain, counters),
+    counters.failed ? "error" : "success",
+  );
+}
 
 async function runBulkImport() {
   const ctx = getJiraContext();
@@ -251,124 +325,72 @@ async function runBulkImport() {
   try {
     if (!(await ensureJiraReady(jiraOrigin, projectKey))) return;
 
-    let created = 0,
-      skipped = 0,
-      failed = 0;
-
     progressSection.style.display = "block";
     updateProgress(0, selectedRows.length, "Starting import…");
 
-    // Process rows concurrently with a bounded pool — sequential imports
-    // take ~2 API calls + 250ms per row, so N rows cost ~2N serial round
-    // trips. A small pool keeps the per-worker pacing (and Jira's rate
-    // limits) intact while cutting wall time by ~the pool size.
-    const MAX_CONCURRENT = 4;
-    let nextRow = 0;
-    let completed = 0;
+    const { counters, completed } = await runBulkWorkerPool(
+      selectedRows.length,
+      async (index, counters, progress) => {
+        if (abortRequested) return;
 
-    const processRow = async (row) => {
-      if (abortRequested) return;
-      setStatus(
-        `Processing ${completed + 1} of ${selectedRows.length}...`,
-        "loading",
-      );
-      setRowStatus(row, "checking", "Checking…");
-
-      try {
-        const existing = await findExistingJiraIssue(
-          jiraOrigin,
-          projectKey,
-          row.title,
+        const row = selectedRows[index];
+        setStatus(
+          `Processing ${progress.completed + 1} of ${selectedRows.length}...`,
+          "loading",
         );
+        setRowStatus(row, "checking", "Checking…");
 
-        if (existing.error) {
-          setRowStatus(row, "error", "Duplicate check failed");
-          failed++;
-        } else if (existing.issue) {
-          const url = `${jiraOrigin}/browse/${existing.issue.key}`;
-          setRowStatus(
-            row,
-            "exists",
-            `Already exists — <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(existing.issue.key)}</a>`,
-          );
-          skipped++;
-        } else {
-          setRowStatus(row, "creating", "Creating…");
-          const issue = await createJiraIssue(
+        try {
+          const existing = await findExistingJiraIssue(
             jiraOrigin,
             projectKey,
             row.title,
-            buildIssueDescription(row.sourceUrl, row.description),
           );
-          const url = `${jiraOrigin}/browse/${issue.key}`;
-          setRowStatus(
-            row,
-            "created",
-            `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>`,
-          );
-          created++;
+
+          if (existing.error) {
+            setRowStatus(row, "error", "Duplicate check failed");
+            counters.failed++;
+          } else if (existing.issue) {
+            const url = `${jiraOrigin}/browse/${existing.issue.key}`;
+            setRowStatus(
+              row,
+              "exists",
+              `Already exists — <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(existing.issue.key)}</a>`,
+            );
+            counters.skipped++;
+          } else {
+            setRowStatus(row, "creating", "Creating…");
+            const issue = await createJiraIssue(
+              jiraOrigin,
+              projectKey,
+              row.title,
+              buildIssueDescription(row.sourceUrl, row.description),
+            );
+            const url = `${jiraOrigin}/browse/${issue.key}`;
+            setRowStatus(
+              row,
+              "created",
+              `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>`,
+            );
+            counters.created++;
+          }
+        } catch (err) {
+          setRowStatus(row, "error", escapeHtml(err.message || "Failed"));
+          counters.failed++;
         }
-      } catch (err) {
-        setRowStatus(row, "error", escapeHtml(err.message || "Failed"));
-        failed++;
-      }
-
-      completed++;
-      updateProgress(completed, selectedRows.length);
-      if (!abortRequested) await sleep(250);
-    };
-
-    const worker = async () => {
-      while (nextRow < selectedRows.length && !abortRequested) {
-        await processRow(selectedRows[nextRow++]);
-      }
-    };
-
-    await Promise.all(
-      Array.from(
-        { length: Math.min(MAX_CONCURRENT, selectedRows.length) },
-        worker,
-      ),
+      },
     );
 
-    updateProgress(selectedRows.length, selectedRows.length, "Import complete");
-
-    // Finished rows move to the top with their checkboxes disabled. The
-    // import CTA stays visible while anything is still selectable (failed
-    // or unprocessed rows) and is hidden only when every row is done.
-    reorderBulkRowsAfterImport();
-
-    const selectableRemain = state.bulkRows.some(
-      (r) =>
-        r.statusEl.dataset.state !== "created" &&
-        r.statusEl.dataset.state !== "exists",
-    );
-    if (selectableRemain) {
-      unlockBulkImport();
-    } else {
-      lockBulkImport();
-    }
-
-    if (abortRequested) {
-      updateProgress(completed, selectedRows.length, "Import stopped");
-      setStatus(
-        `Stopped. ${created} created, ${skipped} already existed, ${failed} failed.`,
-        failed ? "error" : "info",
-      );
-      return;
-    }
-
-    if (created > 0 || skipped > 0) saveProjectHistory(projectKey);
-    exportBtn.style.display = "block";
-
-    if (selectableRemain) {
-      setStatus(
-        `Done. ${created} created, ${skipped} already existed, ${failed} failed.`,
-        failed ? "error" : "success",
-      );
-    } else {
-      setStatus("Bulk import done! try different report", "success");
-    }
+    finishBulkRun({
+      total: selectedRows.length,
+      projectKey,
+      counters,
+      completed,
+      doneMessage: (selectableRemain, c) =>
+        selectableRemain
+          ? `Done. ${bulkCountsSummary(c)}`
+          : "Bulk import done! try different report",
+    });
   } finally {
     abortImportBtn.style.display = "none";
     setBulkBusy(false);
@@ -418,28 +440,42 @@ async function ensureJiraReady(jiraOrigin, projectKey) {
 }
 
 // Uploads the scraped page's captured images and swaps their placeholders
-// in the description body for the real attachment media nodes.
+// in the description body for the real attachment media nodes. Uploads run
+// through a small bounded pool — Jira has no bulk attachment endpoint, so
+// many small files are faster batched than strung one after another.
 async function attachImagesToIssue(jiraOrigin, issueKey, images, description) {
   setStatus("Uploading images...", "loading");
 
   const byPlaceholder = {};
+  const MAX_CONCURRENT = 4;
+  let next = 0;
 
-  for (const img of images) {
-    try {
-      const blob = dataUrlToBlob(img.dataUrl);
-      const ext = (blob.type.split("/")[1] || "png").split("+")[0];
-      const filename = img.name || `${img.placeholder}.${ext}`;
-      const attachment = await uploadJiraAttachment(
-        jiraOrigin,
-        issueKey,
-        blob,
-        filename,
-      );
-      byPlaceholder[img.placeholder] = fileMediaNode(attachment);
-    } catch (err) {
-      console.error("Image upload failed:", img.placeholder, err);
+  const uploadOne = async () => {
+    while (next < images.length) {
+      const img = images[next++];
+      try {
+        const blob = dataUrlToBlob(img.dataUrl);
+        const ext = (blob.type.split("/")[1] || "png").split("+")[0];
+        const filename = img.name || `${img.placeholder}.${ext}`;
+        const attachment = await uploadJiraAttachment(
+          jiraOrigin,
+          issueKey,
+          blob,
+          filename,
+        );
+        byPlaceholder[img.placeholder] = fileMediaNode(attachment);
+      } catch (err) {
+        console.error("Image upload failed:", img.placeholder, err);
+      }
     }
-  }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(MAX_CONCURRENT, images.length) },
+      uploadOne,
+    ),
+  );
 
   setStatus("Attaching images to ticket...", "loading");
 
@@ -540,197 +576,129 @@ async function runListingImport(site) {
       }
     }
 
-    const MAX_CONCURRENT = 4;
-    let nextIndex = 0;
-    let completed = 0;
-    let created = 0;
-    let skipped = 0;
-    let failed = 0;
+    const { counters, completed } = await runBulkWorkerPool(
+      items.length,
+      async (index, counters, progress) => {
+        if (abortRequested) return;
 
-    const processItem = async (index) => {
-      if (abortRequested) return;
-
-      const row = rows[index];
-      let detail = details[index];
-      setStatus(
-        `Processing ${completed + 1} of ${items.length} (${items[index].id})...`,
-        "loading",
-      );
-
-      // Spark detail: the Table API is preferred — the same-origin session +
-      // X-UserToken (CSRF) call, identical to Octane. Only if an item can't
-      // resolve via the API does it fall back to the incident details page in
-      // a background tab.
-      if (flowSite === "Spark" && (!detail || detail.error)) {
-        setRowStatus(row, "checking", "Opening incident page…");
-        try {
-          detail = await fetchSparkDetailInTab(items[index].url);
-        } catch (err) {
-          detail = {
-            id: items[index].id,
-            url: items[index].url,
-            error: err.message || "Couldn't open the incident details page.",
-          };
-        }
-      }
-
-      // Detail is required for both sites: Octane from the API, Spark from
-      // the details page.
-      if (!detail || detail.error) {
-        setRowStatus(
-          row,
-          "error",
-          escapeHtml(detail?.error || "Details didn't load"),
+        const row = rows[index];
+        const detail = details[index];
+        setStatus(
+          `Processing ${progress.completed + 1} of ${items.length} (${items[index].id})...`,
+          "loading",
         );
-        failed++;
-        completed++;
-        updateProgress(completed, items.length);
-        if (!abortRequested) await sleep(250);
-        return;
-      }
 
-      // Make the detail authoritative for the row: the INC number + short
-      // description (from the details-page title, or the API record) replace
-      // the list-seeded sys_id title so the summary matches the single-ticket
-      // "SPARK | <number> | <description>" dedup format.
-      if (flowSite === "Spark") {
-        const titleParts = (detail.title || "").split(" | ");
-        const number =
-          titleParts.length >= 3 ? titleParts[1] : detail.number || "";
-        const detailName =
-          titleParts.length >= 3
-            ? titleParts.slice(2).join(" | ")
-            : detail.name || "";
-        if (number && detailName) {
-          const refinedTitle = `SPARK | ${number} | ${detailName}`;
-          if (refinedTitle !== row.title) {
-            row.title = refinedTitle;
-            const span = row.titleEl.querySelector(".clamped");
-            if (span) span.textContent = refinedTitle;
-          }
-          row.name = detailName;
-        }
-        // The details page yields raw text; the API path keeps the list seed.
-        if (detail.text) row.description = detail.text;
-      }
-
-      setRowStatus(row, "checking", "Checking…");
-
-      const existing = await findExistingJiraIssue(
-        jiraOrigin,
-        projectKey,
-        row.title,
-      );
-      if (existing.error) {
-        setRowStatus(row, "error", "Duplicate check failed");
-        failed++;
-      } else if (existing.issue) {
-        const url = `${jiraOrigin}/browse/${existing.issue.key}`;
-        setRowStatus(
-          row,
-          "exists",
-          `Already exists — <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(existing.issue.key)}</a>`,
-        );
-        skipped++;
-      } else {
-        setRowStatus(row, "creating", "Creating…");
-        try {
-          // Both sites converge here: html is rich Octane content or the
-          // Spark description text escaped for htmlToADF.
-          const bodyAdf = htmlToADF(detail.html || "");
-          const issueDescription = {
-            version: 1,
-            type: "doc",
-            content: [
-              ...sourceUrlBlock(detail.url || row.sourceUrl),
-              ...bodyAdf.content,
-            ],
-          };
-
-          const issue = await createJiraIssue(
-            jiraOrigin,
-            projectKey,
-            row.title,
-            issueDescription,
-          );
-
-          if (detail.images?.length) {
-            await attachImagesToIssue(
-              jiraOrigin,
-              issue.key,
-              detail.images,
-              issueDescription,
-            );
-          }
-
-          const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
+        // Both sites' details come from the batched same-origin API call
+        // above; a failed record is surfaced on its row but doesn't stall
+        // the rest of the import.
+        if (!detail || detail.error) {
           setRowStatus(
             row,
-            "created",
-            `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>`,
+            "error",
+            escapeHtml(detail?.error || "Details didn't load"),
           );
-          created++;
-          setStatus(`Created ${issue.key}.`, "success");
-        } catch (err) {
-          console.error(`${flowSite} import failed for`, items[index].id, err);
-          setRowStatus(row, "error", escapeHtml(err.message || "Failed"));
-          failed++;
+          counters.failed++;
+          return;
         }
-      }
 
-      completed++;
-      updateProgress(completed, items.length);
-      if (!abortRequested) await sleep(250);
-    };
+        // Make the detail authoritative for the row: the INC number + short
+        // description (from the details-page title, or the API record) replace
+        // the list-seeded sys_id title so the summary matches the single-ticket
+        // "SPARK | <number> | <description>" dedup format.
+        if (flowSite === "Spark") {
+          const titleParts = (detail.title || "").split(" | ");
+          const number =
+            titleParts.length >= 3 ? titleParts[1] : detail.number || "";
+          const detailName =
+            titleParts.length >= 3
+              ? titleParts.slice(2).join(" | ")
+              : detail.name || "";
+          if (number && detailName) {
+            const refinedTitle = `SPARK | ${number} | ${detailName}`;
+            if (refinedTitle !== row.title) {
+              row.title = refinedTitle;
+              const span = row.titleEl.querySelector(".clamped");
+              if (span) span.textContent = refinedTitle;
+            }
+            row.name = detailName;
+          }
+          // The details page yields raw text; the API path keeps the list seed.
+          if (detail.text) row.description = detail.text;
+        }
 
-    const worker = async () => {
-      while (nextIndex < items.length && !abortRequested) {
-        await processItem(nextIndex++);
-      }
-    };
+        setRowStatus(row, "checking", "Checking…");
 
-    await Promise.all(
-      Array.from(
-        { length: Math.min(MAX_CONCURRENT, items.length) },
-        worker,
-      ),
+        const existing = await findExistingJiraIssue(
+          jiraOrigin,
+          projectKey,
+          row.title,
+        );
+        if (existing.error) {
+          setRowStatus(row, "error", "Duplicate check failed");
+          counters.failed++;
+        } else if (existing.issue) {
+          const url = `${jiraOrigin}/browse/${existing.issue.key}`;
+          setRowStatus(
+            row,
+            "exists",
+            `Already exists — <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(existing.issue.key)}</a>`,
+          );
+          counters.skipped++;
+        } else {
+          setRowStatus(row, "creating", "Creating…");
+          try {
+            // Both sites converge here: html is rich Octane content or the
+            // Spark description text escaped for htmlToADF.
+            const bodyAdf = htmlToADF(detail.html || "");
+            const issueDescription = {
+              version: 1,
+              type: "doc",
+              content: [
+                ...sourceUrlBlock(detail.url || row.sourceUrl),
+                ...bodyAdf.content,
+              ],
+            };
+
+            const issue = await createJiraIssue(
+              jiraOrigin,
+              projectKey,
+              row.title,
+              issueDescription,
+            );
+
+            if (detail.images?.length) {
+              await attachImagesToIssue(
+                jiraOrigin,
+                issue.key,
+                detail.images,
+                issueDescription,
+              );
+            }
+
+            const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
+            setRowStatus(
+              row,
+              "created",
+              `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>`,
+            );
+            counters.created++;
+            setStatus(`Created ${issue.key}.`, "success");
+          } catch (err) {
+            console.error(`${flowSite} import failed for`, items[index].id, err);
+            setRowStatus(row, "error", escapeHtml(err.message || "Failed"));
+            counters.failed++;
+          }
+        }
+      },
     );
 
-    updateProgress(items.length, items.length, "Import complete");
-
-    // Finished rows move to the top with their checkboxes disabled; rows
-    // that failed stay selectable so they can be retried with the same CTA.
-    reorderBulkRowsAfterImport();
-
-    const selectableRemain = state.bulkRows.some(
-      (r) =>
-        r.statusEl.dataset.state !== "created" &&
-        r.statusEl.dataset.state !== "exists",
-    );
-    if (selectableRemain) {
-      unlockBulkImport();
-    } else {
-      lockBulkImport();
-    }
-
-    if (created > 0 || skipped > 0) saveProjectHistory(projectKey);
-
-    if (abortRequested) {
-      updateProgress(completed, items.length, "Import stopped");
-      setStatus(
-        `Stopped. ${created} created, ${skipped} already existed, ${failed} failed.`,
-        failed ? "error" : "info",
-      );
-      return;
-    }
-
-    // The finished preview rows are reportable just like the Excel flow.
-    exportBtn.style.display = "block";
-
-    setStatus(
-      `Done. ${created} created, ${skipped} already existed, ${failed} failed.`,
-      failed ? "error" : "success",
-    );
+    finishBulkRun({
+      total: items.length,
+      projectKey,
+      counters,
+      completed,
+      doneMessage: (_selectableRemain, c) => `Done. ${bulkCountsSummary(c)}`,
+    });
   } finally {
     abortImportBtn.style.display = "none";
     setBulkBusy(false);

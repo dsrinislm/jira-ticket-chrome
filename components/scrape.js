@@ -4,8 +4,6 @@
 // scraped through chrome.scripting. All scrapers return a normalized shape:
 // { title, id, source, url, html, images }.
 
-import { sleep } from "./util.js";
-
 // --- Site config ------------------------------------------------------------
 // Each entry: name (must match the popup's source-site switch and is used
 // for the Jira title prefix), plus DOM selectors for the ticket id, title
@@ -256,53 +254,6 @@ async function getPageData(siteName) {
   return scrapeTab(currentTab.id, siteName);
 }
 
-// Waits (by polling) until the given tab finishes loading, with a timeout so
-// a hung page can't block the import forever.
-function waitForTabComplete(tabId, timeoutMs = 20000) {
-  return new Promise((resolve, reject) => {
-    const started = Date.now();
-
-    const poll = async () => {
-      let tab;
-      try {
-        tab = await chrome.tabs.get(tabId);
-      } catch (err) {
-        // Tab went away (e.g. closed) — treat as a load failure.
-        return reject(err);
-      }
-      if (tab.status === "complete") return resolve(tab);
-      if (Date.now() - started > timeoutMs) {
-        return reject(
-          new Error("Timed out waiting for the incident page to load."),
-        );
-      }
-      setTimeout(poll, 250);
-    };
-
-    poll();
-  });
-}
-
-// Opens an incident's details page in a background tab, scrapes it with the
-// user's active session (the tab loads like any normal page — no REST call,
-// so no Basic-auth prompt), then closes the tab. Returns the Spark pageData.
-export async function fetchSparkDetailInTab(url) {
-  const tab = await chrome.tabs.create({ url, active: false });
-
-  try {
-    await waitForTabComplete(tab.id);
-    // Some ServiceNow fields populate shortly after the load event.
-    await sleep(500);
-    const pageData = await scrapeTab(tab.id, "Spark");
-    if (!pageData?.title) {
-      throw new Error("Couldn't read the incident details page.");
-    }
-    return pageData;
-  } finally {
-    chrome.tabs.remove(tab.id).catch(() => {});
-  }
-}
-
 // --- Octane listing page ------------------------------------------------------
 // The "import from the current page" bulk flow reads the checkbox-selected
 // rows out of the Octane listing grid (SlickGrid) and returns each selected
@@ -379,20 +330,65 @@ export function detectListingInPage() {
   return null;
 }
 
-export async function detectListingInTab() {
+// Runs in the tab's page context: computes both the details-page site and the
+// listing site in one pass.
+function detectTabStateInPage(sites) {
+  const matches = (selector) => {
+    try {
+      return !!document.querySelector(selector);
+    } catch {
+      return false;
+    }
+  };
+
+  let site = null;
+  for (const s of sites) {
+    const idFound = matches(s.idSelector);
+    const titleFound = [].concat(s.titleSelectors).some(matches);
+    if (idFound && titleFound) {
+      site = s.name;
+      break;
+    }
+  }
+
+  let listing = null;
+  if (matches("div.slick-row") && matches("a.alm-entity-grid-id-column")) {
+    listing = "Octane";
+  } else {
+    const formlink = document.querySelector("a.linked.formlink");
+    if (
+      matches("tr.list_row") &&
+      formlink &&
+      /incident\.do/.test(formlink.getAttribute("href") || "")
+    ) {
+      listing = "Spark";
+    }
+  }
+
+  return { site, listing };
+}
+
+// One all-frames scan that detects both the details-page site and the listing
+// site. The single-ticket and listing flows both re-run on every tab/URL
+// change, so detecting them together halves the per-event page work.
+export async function detectTabState() {
   const currentTab = await getCurrentTab();
 
   try {
-    // Scan every frame: ServiceNow is often served inside a shell iframe
-    // (same reason detectSiteInTab scans all frames), so the list markup
-    // isn't always in the main frame.
     const results = await chrome.scripting.executeScript({
       target: { tabId: currentTab.id, allFrames: true },
-      func: detectListingInPage,
+      func: detectTabStateInPage,
+      args: [SITES],
     });
-    return results.map((r) => r.result).find(Boolean) || null;
+
+    // The main frame comes first: prefer its site match. Listing markup can
+    // live in a shell iframe, so take the first frame that found one.
+    const site = results.map((r) => r.result?.site).find(Boolean) || null;
+    const listing =
+      results.map((r) => r.result?.listing).find(Boolean) || null;
+    return { site, listing };
   } catch {
-    return null;
+    return { site: null, listing: null };
   }
 }
 
@@ -692,23 +688,38 @@ export function fetchListingDetailsInPage(ids, site) {
   }
 
   // Runs in the page context, so it must return a plain (serializable) value.
+  // Items are fetched through a small bounded pool, but written back into
+  // their original slots so the caller's position-based lookup still matches
+  // the requested ids.
   return (async () => {
-    const items = [];
-    for (const id of idList) {
-      try {
-        items.push(await fetchItem(id));
-      } catch (err) {
-        items.push({
-          id: String(id),
-          name: "",
-          description: "",
-          html: "",
-          images: [],
-          url: itemUrl(id),
-          error: err.message || `${apiName} fetch failed`,
-        });
+    const items = new Array(idList.length);
+    let next = 0;
+    const MAX_PAR = 4;
+    const worker = async () => {
+      while (next < idList.length) {
+        const index = next++;
+        const id = idList[index];
+        try {
+          items[index] = await fetchItem(id);
+        } catch (err) {
+          items[index] = {
+            id: String(id),
+            name: "",
+            description: "",
+            html: "",
+            images: [],
+            url: itemUrl(id),
+            error: err.message || `${apiName} fetch failed`,
+          };
+        }
       }
-    }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(MAX_PAR, idList.length) },
+        worker,
+      ),
+    );
     return { items };
   })();
 }

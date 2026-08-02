@@ -114,11 +114,16 @@ export async function downloadPreviewReport() {
   }
 }
 
-// Builds a Status/ID/Name/Description workbook straight from the preview rows
-// when there is no source file to stamp (the listing page import flow).
+// Builds a Status/<ID-or-Number>/<Name-or-Short description>/Description
+// workbook straight from the preview rows when there is no source file to
+// stamp (the listing page import flow). The header schema follows the row
+// site so the export round-trips: re-importing a Spark report is detected
+// as Spark (Number/Short description) instead of being misread as Octane.
 export function buildOctaneReportWorkbook(ExcelJS, bulkRows) {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Report");
+
+  const isSpark = String(bulkRows[0]?.site || "Octane") === "Spark";
 
   const headerFont = {
     name: "Arial",
@@ -138,12 +143,19 @@ export function buildOctaneReportWorkbook(ExcelJS, bulkRows) {
     color: { argb: "FF0000FF" },
   };
 
-  sheet.columns = [
-    { header: "Status", width: 24 },
-    { header: "ID", width: 14 },
-    { header: "Name", width: 40 },
-    { header: "Description", width: 50 },
-  ];
+  sheet.columns = isSpark
+    ? [
+        { header: "Status", width: 24 },
+        { header: "Number", width: 14 },
+        { header: "Short description", width: 40 },
+        { header: "Description", width: 50 },
+      ]
+    : [
+        { header: "Status", width: 24 },
+        { header: "ID", width: 14 },
+        { header: "Name", width: 40 },
+        { header: "Description", width: 50 },
+      ];
 
   sheet.getRow(1).eachCell((cell) => {
     cell.font = headerFont;

@@ -232,16 +232,13 @@ body {
   font-weight: 700;
 }
 
-.site-toggle.locked {
-  opacity: 0.65;
-}
-
 .hidden {
   display: none !important;
 }
 
-.site-toggle.locked .site-toggle-label,
+.site-toggle.locked .site-toggle-label:disabled,
 .site-toggle.locked .switch {
+  opacity: 0.55;
   cursor: not-allowed;
 }
 

@@ -30,10 +30,15 @@ export function setSourceSite(site) {
 }
 
 // When the active tab fully matches a site, the source can't be switched
-// manually — disable the toggle and its labels.
+// manually. The selected site's button stays enabled (clicking it just
+// re-selects the same site); only the other site's button and the switch
+// are disabled.
 export function setSourceSiteLocked(locked) {
   sourceSiteInput.disabled = locked;
-  sourceSiteLabels.forEach((label) => (label.disabled = locked));
+  const current = getSourceSite();
+  sourceSiteLabels.forEach((label) => {
+    label.disabled = locked && label.dataset.site !== current;
+  });
   document.querySelector(".site-toggle")?.classList.toggle("locked", locked);
 }
 
@@ -56,6 +61,7 @@ export const fileError = el("fileError");
 export const fileSummary = el("fileSummary");
 export const previewSection = el("previewSection");
 export const previewBody = el("previewBody");
+export const previewIdHeader = el("previewIdHeader");
 export const selectAllCheckbox = el("selectAllCheckbox");
 export const selectAllLabel = document.querySelector(".select-all");
 export const selectionCount = el("selectionCount");
@@ -161,10 +167,25 @@ export function updateBulkStatusMessage() {
     jiraBaseUrlInput.value.trim() && projectKeyInput.value.trim();
   setStatus(
     jiraConfigured
-      ? "Upload Octane or Spark report"
+      ? activeListingSite
+        ? "Upload report or Import selected listing"
+        : "Upload Octane or Spark report"
       : "Configure Jira details and create a ticket.",
     "info",
   );
+}
+
+// The site detected on the active tab's listing page (null when the tab isn't
+// a supported listing). Lets the bulk status message say "Import selected
+// listing" only where that action actually exists.
+let activeListingSite = null;
+
+export function setActiveListingSite(site) {
+  activeListingSite = site || null;
+}
+
+export function getActiveListingSite() {
+  return activeListingSite;
 }
 
 const DROPZONE_ICON_EXCEL =
@@ -362,6 +383,10 @@ export function addBulkRow(record, site = "Octane") {
   const siteTag = String(site || "Octane").toUpperCase();
   const titleParts = [siteTag, record.idText, record.name].filter(Boolean);
   const title = record.title || titleParts.join(" | ");
+  // Mirror the site's report schema in the id column header so the preview
+  // matches what will be exported (and round-trip on re-import): INC
+  // "Number" for Spark, numeric "ID" for Octane.
+  previewIdHeader.textContent = site === "Spark" ? "Number" : "ID";
   const tr = document.createElement("tr");
 
   const checkTd = document.createElement("td");
