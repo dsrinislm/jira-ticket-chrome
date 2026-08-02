@@ -7,6 +7,7 @@ export const statusDiv = el("status");
 export const statusText = el("statusText");
 export const ticketResult = el("ticketResult");
 export const gapArt = el("gapArt");
+export const gapArtBulk = el("gapArtBulk");
 export const loginBtn = el("openWebsite");
 export const bulkLoginBtn = el("bulkLoginBtn");
 export const exportBtn = el("exportBtn");
@@ -310,8 +311,19 @@ export function setBulkBusy(isBusy) {
   listingImportBtn.disabled = isBusy;
 }
 
+// Remembers each view's scroll offset so switching tabs restores the user's
+// place instead of snapping to the top. Both views scroll inside the popup
+// body (html has overflow hidden; body is the actual scroll container).
+const viewScroll = { single: 0, bulk: 0 };
+
 export function switchView(view, focusTab = true) {
   const isBulk = view === "bulk";
+  const entering = isBulk ? "bulk" : "single";
+  const leaving = isBulk ? "single" : "bulk";
+
+  // Capture the outgoing view's scroll before hiding it, while it still has
+  // height — a hidden view has none, so reading it there always returns 0.
+  viewScroll[leaving] = document.body.scrollTop || 0;
 
   singleView.hidden = isBulk;
   bulkView.hidden = !isBulk;
@@ -341,6 +353,10 @@ export function switchView(view, focusTab = true) {
   if (focusTab) {
     (isBulk ? tabBulk : tabSingle)?.focus?.({ preventScroll: true });
   }
+
+  // Put the entering view back where the user left it. Setting scrollTop is
+  // synchronous, so this applies as soon as the new height is laid out.
+  document.body.scrollTop = viewScroll[entering] || 0;
 }
 
 // The "Current Ticket" flow only works while the active tab is a detected

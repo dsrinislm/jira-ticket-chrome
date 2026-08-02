@@ -1,33 +1,38 @@
-import { gapArt } from "./ui.js";
+import { gapArt, gapArtBulk } from "./ui.js";
 
-// Decorative canvas that occupies the gap between the "Create ticket" CTA
-// and the status bar. The gap opens up when no source site (Octane/Spark)
-// is detected, because the source-site section is hidden. It's filled with
-// a slow field of drifting dots in the popup's indigo palette.
-// Pauses (no drawing) while the canvas is hidden and renders a single
-// static frame for reduced-motion users.
+// Decorative canvases that occupy the gap between the main content and the
+// bottom of the popup. The single view's gap opens up when no source site
+// (Octane/Spark) is detected, because the source-site section is hidden; the
+// bulk view's gap is its trailing .view-fill space (pinned to the single
+// view's height by the initial load-time equalizer). Both are filled with a
+// slow field of drifting dots in the popup's indigo palette.
+// Only the visible canvas paints (the other view is display:none, so its
+// canvas measures 0 and is skipped); pauses entirely while the document is
+// backgrounded and renders a single static frame for reduced-motion users.
 const PALETTE = [
   [91, 75, 255],
   [145, 132, 255],
   [196, 191, 255],
 ];
 
-let ctx = null;
-let width = 0;
-let height = 0;
-let particles = [];
-let rafId = 0;
-
 const reducedMotion =
   (typeof window !== "undefined" &&
     window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) ||
   false;
 
-function spawn() {
-  const count = Math.max(24, Math.round((width * height) / 9000));
-  particles = Array.from({ length: count }, () => ({
-    x: Math.random() * width,
-    y: Math.random() * height,
+const scenes = [gapArt, gapArtBulk].filter(Boolean).map((canvas) => ({
+  canvas,
+  ctx: null,
+  width: 0,
+  height: 0,
+  particles: [],
+}));
+
+function spawn(scene) {
+  const count = Math.max(24, Math.round((scene.width * scene.height) / 9000));
+  scene.particles = Array.from({ length: count }, () => ({
+    x: Math.random() * scene.width,
+    y: Math.random() * scene.height,
     r: 0.6 + Math.random() * 1.8,
     vx: (Math.random() - 0.5) * 0.16,
     vy: -(0.05 + Math.random() * 0.2),
@@ -36,62 +41,67 @@ function spawn() {
   }));
 }
 
-function resize() {
-  const rect = gapArt.getBoundingClientRect();
+function resize(scene) {
+  const rect = scene.canvas.getBoundingClientRect();
   const dpr = Math.min(
     2,
     (typeof window !== "undefined" && window.devicePixelRatio) || 1,
   );
-  width = Math.max(1, Math.round(rect.width));
-  height = Math.max(1, Math.round(rect.height));
-  gapArt.width = Math.round(width * dpr);
-  gapArt.height = Math.round(height * dpr);
-  ctx = gapArt.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  spawn();
+  scene.width = Math.max(1, Math.round(rect.width));
+  scene.height = Math.max(1, Math.round(rect.height));
+  scene.canvas.width = Math.round(scene.width * dpr);
+  scene.canvas.height = Math.round(scene.height * dpr);
+  scene.ctx = scene.canvas.getContext("2d");
+  scene.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  spawn(scene);
 }
 
-function paint() {
-  ctx.clearRect(0, 0, width, height);
-  for (const p of particles) {
+function paint(scene) {
+  scene.ctx.clearRect(0, 0, scene.width, scene.height);
+  for (const p of scene.particles) {
     const [r, g, b] = p.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${p.alpha.toFixed(3)})`;
-    ctx.fill();
+    scene.ctx.beginPath();
+    scene.ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    scene.ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${p.alpha.toFixed(3)})`;
+    scene.ctx.fill();
   }
 }
 
-function update() {
-  for (const p of particles) {
+function update(scene) {
+  for (const p of scene.particles) {
     p.x += p.vx;
     p.y += p.vy;
     if (p.y < -4) {
-      p.y = height + 4;
-      p.x = Math.random() * width;
+      p.y = scene.height + 4;
+      p.x = Math.random() * scene.width;
     }
-    if (p.x < -4) p.x = width + 4;
-    if (p.x > width + 4) p.x = -4;
+    if (p.x < -4) p.x = scene.width + 4;
+    if (p.x > scene.width + 4) p.x = -4;
   }
 }
 
-// The animation only runs while it can actually be seen: the canvas is
-// measured (0 when hidden behind the bulk view or the source-site section)
-// and the loop is paused entirely when the document is backgrounded. A
-// never-stopping rAF loop costs nothing to draw but still wakes the CPU at
-// ~60fps for as long as the popup is open.
+// The animation only runs while it can actually be seen: a canvas is measured
+// (0 when hidden behind the other view or the source-site section) and the
+// loop is paused entirely when the document is backgrounded. A never-stopping
+// rAF loop costs nothing to draw but still wakes the CPU at ~60fps for as
+// long as the popup is open.
+let rafId = 0;
 let running = false;
 
 function frame() {
   if (!running) return;
-  const visible = gapArt.clientWidth > 0 && gapArt.clientHeight > 0;
-  if (visible) {
-    if (gapArt.clientWidth !== width || gapArt.clientHeight !== height) {
-      resize();
-      paint();
+  for (const scene of scenes) {
+    const visible = scene.canvas.clientWidth > 0 && scene.canvas.clientHeight > 0;
+    if (!visible) continue;
+    if (
+      scene.canvas.clientWidth !== scene.width ||
+      scene.canvas.clientHeight !== scene.height
+    ) {
+      resize(scene);
+      paint(scene);
     } else if (!reducedMotion) {
-      update();
-      paint();
+      update(scene);
+      paint(scene);
     }
   }
   rafId = requestAnimationFrame(frame);
@@ -110,12 +120,17 @@ function stop() {
 
 function syncVisibility() {
   const visible =
-    gapArt.clientWidth > 0 &&
-    gapArt.clientHeight > 0 &&
+    scenes.some(
+      (scene) => scene.canvas.clientWidth > 0 && scene.canvas.clientHeight > 0,
+    ) &&
     !(typeof document !== "undefined" && document.hidden);
   if (visible) {
-    resize();
-    paint(); // static frame up front so reduced-motion users still see it
+    for (const scene of scenes) {
+      if (scene.canvas.clientWidth > 0 && scene.canvas.clientHeight > 0) {
+        resize(scene);
+        paint(scene); // static frame up front so reduced-motion users still see it
+      }
+    }
     start();
   } else {
     stop();
@@ -124,11 +139,11 @@ function syncVisibility() {
 
 export function startGapArt() {
   document.addEventListener("visibilitychange", syncVisibility);
-  // The canvas toggles between real and zero size as views/sections swap,
+  // Each canvas toggles between real and zero size as views/sections swap,
   // so the observer starts and stops the loop in step with the layout.
   if (typeof ResizeObserver === "function") {
     const observer = new ResizeObserver(syncVisibility);
-    observer.observe(gapArt);
+    scenes.forEach((scene) => observer.observe(scene.canvas));
   }
   syncVisibility();
 }

@@ -8,6 +8,7 @@ import {
   jiraBaseUrlInput,
   projectKeyInput,
   bulkView,
+  singleView,
   createTicketBtn,
   sourceSiteInput,
   sourceSiteLabels,
@@ -264,7 +265,31 @@ async function applyDetectedState() {
   if (!bulkView.hidden) updateBulkStatusMessage();
 }
 
-applyDetectedState();
+applyDetectedState().then(equalizeInitialViewHeights);
+// Chrome sizes the popup window to the body's layout height, so switching
+// between the (differently sized) single and bulk tabs at initial load would
+// resize the window. Measure both views' natural heights and pin each view's
+// min-height to the taller one — the single view's gap-art canvas and the
+// bulk view's .view-fill then absorb the extra space, so both tabs open at
+// the same window size.
+function equalizeInitialViewHeights() {
+  const views = [singleView, bulkView];
+  let tallest = 0;
+  for (const view of views) {
+    // A hidden view reports 0 — show it briefly (synchronously, so nothing
+    // paints) to capture its natural height, then restore the toggle.
+    const wasHidden = view.hidden;
+    view.hidden = false;
+    tallest = Math.max(tallest, view.offsetHeight);
+    view.hidden = wasHidden;
+  }
+  if (tallest > 0) {
+    for (const view of views) {
+      view.style.minHeight = `${tallest}px`;
+    }
+  }
+}
+
 // A tab switch/navigation can fire onActivated and onUpdated back-to-back
 // (and rapid tab-swiping fires many activations in a row). Debounce so one
 // navigation causes at most one all-frames scan of the final active tab.

@@ -355,8 +355,9 @@ body {
   display: none !important;
 }
 
-/* Matches the gap-art filler in the single view so both panels settle on
-   the same height at initial load, regardless of small font-metric drift. */
+/* The bulk view's filler is a canvas too (see .gap-art), so the gap-art
+   animation shows in its trailing space the same way it does in the single
+   view, keeping both panels at the same height at initial load. */
 .view-fill {
   flex: 1 1 0;
   min-height: 0;
