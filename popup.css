@@ -59,6 +59,11 @@ body {
   min-height: 480px;
   max-height: 600px;
   overflow-y: auto;
+  /* Reserve the scrollbar gutter so showing/hiding the vertical scrollbar
+     (e.g. when the attachment picker appears) never shrinks the content
+     area or reflows the form. Overlay scrollbars ignore this, which is
+     fine - they don't consume width either. */
+  scrollbar-gutter: stable;
   padding: 16px;
   font-family: var(--font-ui);
   color: var(--text);
@@ -663,6 +668,7 @@ button:disabled {
   flex-shrink: 0;
   max-height: 220px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
 }
 
 .ticket-card {
@@ -906,6 +912,95 @@ button:disabled {
   color: var(--text-muted);
 }
 
+.attachment-picker {
+  margin: 10px 0 0 22px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 9px;
+  max-height: 190px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.attachment-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.attachment-picker-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.attachment-picker-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.attachment-picker-toggle input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.attachment-group {
+  margin-bottom: 6px;
+}
+
+.attachment-group:last-child {
+  margin-bottom: 0;
+}
+
+.attachment-group-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin: 2px 0 3px;
+}
+
+.attachment-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  padding: 2px 0;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.attachment-item input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: none;
+}
+
+.attachment-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-item-size {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
 .select-all {
   display: flex;
   align-items: center;
@@ -925,6 +1020,7 @@ button:disabled {
 .table-wrap {
   height: 150px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   margin-bottom: 12px;

@@ -39,11 +39,18 @@ import {
   setActiveListingSite,
   getActiveListingSite,
   getIncludeAttachments,
+  getSelectedAttachments,
+  setAttachmentPickerLoading,
+  clearAttachmentPicker,
+  renderAttachmentPicker,
+  attachmentGroups,
+  attachmentSelectAll,
+  includeAttachmentsInput,
   state,
   escapeHtml,
   showLoginButton,
   redirectToLogin,
-  smoothScrollToElement,
+  smoothScrollToBottom,
 } from "./components/ui.js";
 import { debounce, sleep } from "./components/util.js";
 import {
@@ -69,6 +76,7 @@ import {
   scrapeSelectedSparkListingInTab,
   detectTabState,
   fetchListingDetailsInTab,
+  listTicketAttachmentsInTab,
 } from "./components/scrape.js";
 import { startGapArt } from "./components/gap-art.js";
 import { handleFileSelected, downloadPreviewReport } from "./components/excel.js";
@@ -163,6 +171,50 @@ function resetSinglePromptIfIncomplete() {
   }),
 );
 createTicketBtn.addEventListener("click", createTicket);
+
+// "Include attachments" toggles the picker: the ticket's attachments are
+// listed (metadata only — no file bytes are fetched yet) so the user can
+// check exactly which ones to upload. Turning the toggle back off clears the
+// picker so a later re-enable starts from a fresh selection.
+includeAttachmentsInput.addEventListener("change", async () => {
+  if (!getIncludeAttachments()) {
+    clearAttachmentPicker();
+    return;
+  }
+
+  setAttachmentPickerLoading();
+  smoothScrollToBottom();
+
+  try {
+    const items = await listTicketAttachmentsInTab(getSourceSite());
+    if (!getIncludeAttachments()) return; // toggled off while listing
+    if (!items.length) {
+      attachmentGroups.innerHTML =
+        '<div class="attachment-group-title">No attachments found.</div>';
+      smoothScrollToBottom();
+      return;
+    }
+    renderAttachmentPicker(items);
+    smoothScrollToBottom();
+  } catch (err) {
+    console.error(err);
+    attachmentGroups.innerHTML =
+      '<div class="attachment-group-title">Couldn’t list attachments.</div>';
+    smoothScrollToBottom();
+  }
+});
+
+attachmentSelectAll.addEventListener("change", () => {
+  const boxes = attachmentGroups.querySelectorAll(
+    ".attachment-item input[type='checkbox']",
+  );
+  boxes.forEach((box) => {
+    box.checked = attachmentSelectAll.checked;
+  });
+  state.attachmentSelection = attachmentSelectAll.checked
+    ? Array.from(boxes).map((box) => box.dataset.name)
+    : [];
+});
 
 // Lets the user stop an in-flight bulk import. Picked up by the worker
 // pool between rows, so the current row's Jira calls finish first.
@@ -404,14 +456,26 @@ async function runBulkImport() {
   }
 }
 
-// Glides back so the whole bulk view is framed from its top edge, with the
-// result status still readable at the bottom of the viewport. The layout
-// (buttons, status) has settled by the time an import's finally runs.
+// Glides back to the bottom of the popup so the import progress bar and the
+// shared status message are visible. The layout (buttons, status, rows) has
+// settled by the time an import's finally runs, and the glide tracks the
+// live document height, so it reaches the true end even as rows finish.
 function frameBulkView() {
   const run = () => {
     if (bulkView.hidden) return;
-    smoothScrollToElement(bulkView);
+    smoothScrollToBottom();
   };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(run);
+  } else {
+    run();
+  }
+}
+
+// Glides to the bottom of the popup so the freshly rendered ticket card and
+// the shared status message are in view after a create finishes.
+function revealStatus() {
+  const run = () => smoothScrollToBottom();
   if (typeof requestAnimationFrame === "function") {
     requestAnimationFrame(run);
   } else {
@@ -467,6 +531,11 @@ function imageUploadFilename(img) {
   );
 }
 
+// Lists the file names that failed to upload, for the error status line.
+function failedAttachmentNames(failedNames = []) {
+  return failedNames.length ? ` (${failedNames.join(", ")})` : "";
+}
+
 // Uploads a batch of images to a Jira issue through a small bounded pool
 // (Jira has no bulk attachment endpoint — many small files are faster
 // batched than strung one after another). Never touches the description.
@@ -514,7 +583,7 @@ async function uploadImages(jiraOrigin, issueKey, images) {
 async function attachImagesToIssue(jiraOrigin, issueKey, images, description) {
   setStatus("Uploading images...", "loading");
 
-  const { byPlaceholder, failed, firstError } = await uploadImages(
+  const { byPlaceholder, failed, firstError, failedImages } = await uploadImages(
     jiraOrigin,
     issueKey,
     images,
@@ -528,7 +597,11 @@ async function attachImagesToIssue(jiraOrigin, issueKey, images, description) {
     insertUploadedImages(description.content, byPlaceholder),
   );
 
-  return { failed, firstError };
+  return {
+    failed,
+    firstError,
+    failedNames: failedImages.map((img) => imageUploadFilename(img)),
+  };
 }
 
 // Retries the attachments of an already-created ticket: uploads only the
@@ -545,12 +618,33 @@ async function uploadMissingAttachments(jiraOrigin, issueKey, images) {
     return { failed: 0, firstError: "", skipped: images.length };
   }
 
-  const { failed, firstError } = await uploadImages(
+  const { failed, firstError, failedImages } = await uploadImages(
     jiraOrigin,
     issueKey,
     missing,
   );
-  return { failed, firstError, skipped: images.length - missing.length };
+  return {
+    failed,
+    firstError,
+    skipped: images.length - missing.length,
+    failedNames: failedImages.map((img) => imageUploadFilename(img)),
+  };
+}
+
+// Syncs the attachments of an already-created ticket from the current picker
+// selection: uploads only the selected files the issue is missing (the live
+// selection is the source of truth — a null selection means the picker never
+// loaded, so "include everything the page offered", and an empty selection
+// means nothing gets uploaded).
+async function syncSelectedAttachments(jiraOrigin, issueKey, images) {
+  const selection = getSelectedAttachments();
+  if (selection == null) {
+    return uploadMissingAttachments(jiraOrigin, issueKey, images);
+  }
+  const selected = images.filter((img) =>
+    selection.includes(imageUploadFilename(img)),
+  );
+  return uploadMissingAttachments(jiraOrigin, issueKey, selected);
 }
 
 // Bulk flow #2 — no report file needed. The user ticks rows on a supported
@@ -734,6 +828,7 @@ async function runListingImport(site) {
             );
 
             let attachFailed = 0;
+            let attachNames = [];
             if (detail.images?.length) {
               const attachReport = await attachImagesToIssue(
                 jiraOrigin,
@@ -742,18 +837,19 @@ async function runListingImport(site) {
                 issueDescription,
               );
               attachFailed = attachReport.failed;
+              attachNames = attachReport.failedNames || [];
             }
 
             const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
             setRowStatus(
               row,
               "created",
-              `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>${attachFailed ? ` — ${attachFailed} attachment(s) failed to upload` : ""}`,
+              `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>${attachFailed ? ` — ${attachFailed} attachment(s) failed to upload${failedAttachmentNames(attachNames)}` : ""}`,
             );
             counters.created++;
             setStatus(
               attachFailed
-                ? `Created ${issue.key} (${attachFailed} attachment(s) failed to upload).`
+                ? `Created ${issue.key} (${attachFailed} attachment(s) failed to upload${failedAttachmentNames(attachNames)}).`
                 : `Created ${issue.key}.`,
               attachFailed ? "error" : "success",
             );
@@ -794,14 +890,25 @@ async function createTicket() {
 
     // Only scrape (and later upload) the ticket's attachments when the user
     // opted in — capturing every file from the attachments tab is the slow
-    // part of an export, so a no-attachments ticket skips it entirely.
+    // part of an export, so a no-attachments ticket skips it entirely. When
+    // the picker has a selection, only the checked files are captured.
     const includeAttachments = getIncludeAttachments();
+    const selectedAttachments = includeAttachments
+      ? getSelectedAttachments()
+      : undefined;
 
     setStatus("Reading active QA ticket...", "loading");
 
     let pageData;
     try {
-      pageData = await getPageData(getSourceSite(), { includeAttachments });
+      // Phase 1 lists the selected attachments WITHOUT downloading their
+      // bytes. The slow byte downloads happen afterwards — only for the files
+      // a Jira ticket is actually missing.
+      pageData = await getPageData(getSourceSite(), {
+        includeAttachments,
+        selectedAttachments,
+        captureAttachments: false,
+      });
     } catch {
       pageData = null;
     }
@@ -860,33 +967,75 @@ async function createTicket() {
       const issueUrl = `${jiraOrigin}/browse/${existing.issue.key}`;
 
       // A previous create may have left some attachments behind (e.g. a
-      // transient 401 on one upload). Retrying should only upload what's
-      // actually missing — never re-upload what's already on the issue.
+      // transient 401 on one upload). When the ticket already exists, sync
+      // only the files the issue is actually missing: list what's already
+      // attached, then download bytes for just the missing ones — never the
+      // files that are already up to date.
       if (includeAttachments && pageData.images?.length) {
         setStatus(
-          `Uploading missing attachments for ${existing.issue.key}...`,
+          `Checking ${existing.issue.key} attachments...`,
           "loading",
         );
-        const attachReport = await uploadMissingAttachments(
-          jiraOrigin,
-          existing.issue.key,
-          pageData.images,
-        );
-        if (attachReport.failed > 0) {
-          setStatus(
-            `${attachReport.failed} attachment(s) still failed to upload (${attachReport.firstError}).`,
-            "error",
+        let missing = pageData.images;
+        try {
+          const existingNames = new Set(
+            await listIssueAttachments(jiraOrigin, existing.issue.key),
           );
-          renderTicketCard(existing.issue.key, issueUrl);
-          saveProjectHistory(projectKey);
-          return;
+          missing = pageData.images.filter(
+            (img) => !existingNames.has(imageUploadFilename(img)),
+          );
+        } catch {
+          // Listing failed — fall back to capturing everything selected.
         }
-        setStatus(
-          attachReport.skipped > 0
-            ? `Ticket already exists: ${existing.issue.key}. Attachments up to date.`
-            : `Ticket already exists: ${existing.issue.key}. Missing attachments uploaded.`,
-          "success",
-        );
+
+        if (!missing.length) {
+          setStatus(
+            `Ticket already exists: ${existing.issue.key}. Selected attachments up to date.`,
+            "success",
+          );
+        } else {
+          setStatus(
+            `Syncing ${missing.length} missing attachment(s) with ${existing.issue.key}...`,
+            "loading",
+          );
+          const captured = await getPageData(getSourceSite(), {
+            includeAttachments: true,
+            selectedAttachments: missing.map((img) =>
+              imageUploadFilename(img),
+            ),
+          }).catch(() => null);
+
+          if (!captured?.images?.length) {
+            setStatus(
+              `Couldn't capture the missing attachments for ${existing.issue.key}.`,
+              "error",
+            );
+            renderTicketCard(existing.issue.key, issueUrl);
+            saveProjectHistory(projectKey);
+            return;
+          }
+
+          const attachReport = await syncSelectedAttachments(
+            jiraOrigin,
+            existing.issue.key,
+            captured.images,
+          );
+          if (attachReport.failed > 0) {
+            setStatus(
+              `${attachReport.failed} attachment(s) still failed to upload${failedAttachmentNames(attachReport.failedNames)} (${attachReport.firstError}).`,
+              "error",
+            );
+            renderTicketCard(existing.issue.key, issueUrl);
+            saveProjectHistory(projectKey);
+            return;
+          }
+          setStatus(
+            attachReport.skipped > 0
+              ? `Ticket already exists: ${existing.issue.key}. Selected attachments up to date.`
+              : `Ticket already exists: ${existing.issue.key}. Missing attachments uploaded.`,
+            "success",
+          );
+        }
       } else {
         setStatus(`Ticket already exists: ${existing.issue.key}`, "success");
       }
@@ -896,12 +1045,23 @@ async function createTicket() {
       return;
     }
 
-    const bodyAdf = htmlToADF(pageData.html);
+    // New ticket: download the selected attachments' bytes now (phase 1 only
+    // listed them), producing the placeholders the description needs.
+    let capturedData = pageData;
+    if (includeAttachments && pageData.images?.length) {
+      const captured = await getPageData(getSourceSite(), {
+        includeAttachments,
+        selectedAttachments,
+      }).catch(() => null);
+      if (captured?.images?.length) capturedData = captured;
+    }
+
+    const bodyAdf = htmlToADF(capturedData.html);
 
     const issueDescription = {
       version: 1,
       type: "doc",
-      content: [...sourceUrlBlock(pageData.url), ...bodyAdf.content],
+      content: [...sourceUrlBlock(capturedData.url), ...bodyAdf.content],
     };
 
     setStatus("Creating Jira ticket...", "loading");
@@ -914,11 +1074,11 @@ async function createTicket() {
     );
 
     let attachReport = { failed: 0 };
-    if (includeAttachments && pageData.images?.length) {
+    if (includeAttachments && capturedData.images?.length) {
       attachReport = await attachImagesToIssue(
         jiraOrigin,
         issue.key,
-        pageData.images,
+        capturedData.images,
         issueDescription,
       );
     }
@@ -926,7 +1086,7 @@ async function createTicket() {
     const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
     if (attachReport.failed > 0) {
       setStatus(
-        `Created ${issue.key}, but ${attachReport.failed} attachment(s) failed to upload (${attachReport.firstError}).`,
+        `Created ${issue.key}, but ${attachReport.failed} attachment(s) failed to upload${failedAttachmentNames(attachReport.failedNames)} (${attachReport.firstError}).`,
         "error",
       );
     } else {
@@ -939,6 +1099,7 @@ async function createTicket() {
     setStatus(error.message || "Failed to create ticket.", "error");
   } finally {
     setBusy(false);
+    revealStatus();
   }
 }
 

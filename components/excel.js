@@ -119,7 +119,7 @@ export async function downloadPreviewReport() {
 // stamp (the listing page import flow). The header schema follows the row
 // site so the export round-trips: re-importing a Spark report is detected
 // as Spark (Number/Short description) instead of being misread as Octane.
-export function buildOctaneReportWorkbook(ExcelJS, bulkRows) {
+function buildOctaneReportWorkbook(ExcelJS, bulkRows) {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Report");
 
@@ -192,7 +192,7 @@ export function buildOctaneReportWorkbook(ExcelJS, bulkRows) {
   return workbook;
 }
 
-export function downloadBlob(filename, data) {
+function downloadBlob(filename, data) {
   const blob =
     data instanceof Blob
       ? data

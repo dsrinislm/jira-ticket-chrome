@@ -80,13 +80,23 @@
         </span>
       </label>
       <p class="attach-toggle-hint">Upload the ticket's files to the Jira issue. Leave off for a faster export.</p>
+      <div id="attachmentPicker" class="attachment-picker" hidden>
+        <div class="attachment-picker-header">
+          <span class="attachment-picker-title">Choose attachments to upload</span>
+          <label class="attachment-picker-toggle" for="attachmentSelectAll">
+            <input id="attachmentSelectAll" type="checkbox" checked />
+            Select all
+          </label>
+        </div>
+        <div id="attachmentGroups" class="attachment-groups"></div>
+      </div>
     </section>
 
     <div class="button-group">
       <button id="createTicket" type="button">
         <span class="btn-spinner" aria-hidden="true"></span>
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
-        <span class="btn-label">Create ticket</span>
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 11a8 8 0 0 0-15-3.7L3 9.5M3 4.5v5h5M4 13a8 8 0 0 0 15 3.7l2-2.2M21 19.5v-5h-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="btn-label">Create or Sync ticket</span>
       </button>
 
       <button id="openWebsite" class="btn-ghost" type="button" style="display: none;">

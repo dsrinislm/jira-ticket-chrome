@@ -11,7 +11,7 @@ import { debounce } from "./util.js";
 // Strips anything past the origin (path, query, hash) so the field can
 // never actually hold more than a base URL — called live as the user
 // types, rather than erroring after the fact.
-export function stripPathFromJiraBaseUrl(value) {
+function stripPathFromJiraBaseUrl(value) {
   const value_ = value.trim();
   if (!value_) return value;
 

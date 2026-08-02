@@ -2,7 +2,7 @@
 
 // Plain-text Description column -> ADF. Blank lines separate paragraphs;
 // single newlines become hard breaks (ADF has no bare "\n" semantics).
-export function textToADF(text) {
+function textToADF(text) {
   const normalized = String(text ?? "")
     .replace(/\r\n/g, "\n")
     .trim();

@@ -75,7 +75,15 @@ function update() {
   }
 }
 
+// The animation only runs while it can actually be seen: the canvas is
+// measured (0 when hidden behind the bulk view or the source-site section)
+// and the loop is paused entirely when the document is backgrounded. A
+// never-stopping rAF loop costs nothing to draw but still wakes the CPU at
+// ~60fps for as long as the popup is open.
+let running = false;
+
 function frame() {
+  if (!running) return;
   const visible = gapArt.clientWidth > 0 && gapArt.clientHeight > 0;
   if (visible) {
     if (gapArt.clientWidth !== width || gapArt.clientHeight !== height) {
@@ -89,7 +97,38 @@ function frame() {
   rafId = requestAnimationFrame(frame);
 }
 
+function start() {
+  if (running) return;
+  running = true;
+  rafId = requestAnimationFrame(frame);
+}
+
+function stop() {
+  running = false;
+  cancelAnimationFrame(rafId);
+}
+
+function syncVisibility() {
+  const visible =
+    gapArt.clientWidth > 0 &&
+    gapArt.clientHeight > 0 &&
+    !(typeof document !== "undefined" && document.hidden);
+  if (visible) {
+    resize();
+    paint(); // static frame up front so reduced-motion users still see it
+    start();
+  } else {
+    stop();
+  }
+}
+
 export function startGapArt() {
-  resize();
-  frame();
+  document.addEventListener("visibilitychange", syncVisibility);
+  // The canvas toggles between real and zero size as views/sections swap,
+  // so the observer starts and stops the loop in step with the layout.
+  if (typeof ResizeObserver === "function") {
+    const observer = new ResizeObserver(syncVisibility);
+    observer.observe(gapArt);
+  }
+  syncVisibility();
 }

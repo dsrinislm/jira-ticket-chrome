@@ -3,8 +3,6 @@ import {
   projectKeyInput,
   setSourceSite,
   getSourceSite,
-  setIncludeAttachments,
-  getIncludeAttachments,
   projectTagsContainer,
   escapeHtml,
 } from "./ui.js";
@@ -13,20 +11,22 @@ import {
 // get() calls (settings + project history) racing independently.
 export function loadInitialState() {
   chrome.storage.local.get(
-    ["jiraBaseUrl", "projectKey", "sourceSite", "includeAttachments", "projectHistory"],
+    ["jiraBaseUrl", "projectKey", "sourceSite", "projectHistory"],
     (data) => {
       if (data.jiraBaseUrl) jiraBaseUrlInput.value = data.jiraBaseUrl;
       if (data.projectKey) projectKeyInput.value = data.projectKey;
       if (data.sourceSite) setSourceSite(data.sourceSite);
-      if (typeof data.includeAttachments === "boolean") {
-        setIncludeAttachments(data.includeAttachments);
-      }
       // Don't validate/show errors here — the user hasn't touched the
       // field yet, so this only takes effect after blur.
 
       renderProjectHistory(data.projectHistory || []);
     },
   );
+
+  // "Include attachments" is a per-action choice: it must be (re)checked by
+  // the user, so it's never persisted or restored. Drop any value a previous
+  // version saved so it can't linger and silently re-enable.
+  chrome.storage.local.remove("includeAttachments");
 }
 
 export function saveSettings() {
@@ -34,7 +34,6 @@ export function saveSettings() {
     jiraBaseUrl: jiraBaseUrlInput.value.trim(),
     projectKey: projectKeyInput.value.trim(),
     sourceSite: getSourceSite(),
-    includeAttachments: getIncludeAttachments(),
   });
 }
 

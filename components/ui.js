@@ -18,6 +18,9 @@ export const sourceSiteSwitch = el("sourceSiteSwitch");
 export const sourceSiteInput = el("sourceSiteInput");
 export const sourceSiteLabels = document.querySelectorAll(".site-toggle-label");
 export const includeAttachmentsInput = el("includeAttachments");
+export const attachmentPicker = el("attachmentPicker");
+export const attachmentGroups = el("attachmentGroups");
+export const attachmentSelectAll = el("attachmentSelectAll");
 
 export function getIncludeAttachments() {
   return includeAttachmentsInput.checked;
@@ -25,6 +28,105 @@ export function getIncludeAttachments() {
 
 export function setIncludeAttachments(checked) {
   includeAttachmentsInput.checked = Boolean(checked);
+}
+
+// The picker's selection: null means "not chosen / include everything" (the
+// picker was never loaded, e.g. the user created the ticket before the list
+// came back), an empty array means the user deselected every file, and a
+// non-empty array holds the file names to upload.
+export function getSelectedAttachments() {
+  return state.attachmentSelection;
+}
+
+export function setAttachmentPickerLoading() {
+  attachmentPicker.hidden = false;
+  attachmentGroups.innerHTML = "";
+  state.attachmentSelection = null;
+}
+
+export function clearAttachmentPicker() {
+  attachmentPicker.hidden = true;
+  attachmentGroups.innerHTML = "";
+  attachmentSelectAll.checked = true;
+  state.attachmentSelection = null;
+}
+
+const ATTACHMENT_GROUP_LABELS = { video: "Video", image: "Image", other: "Other" };
+
+function formatBytes(bytes) {
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = n;
+  let unit = "B";
+  for (const u of units) {
+    size /= 1024;
+    unit = u;
+    if (size < 1024) break;
+  }
+  return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
+}
+
+export function renderAttachmentPicker(items) {
+  attachmentPicker.hidden = false;
+  attachmentGroups.innerHTML = "";
+  state.attachmentSelection = items.map((i) => i.name);
+
+  const grouped = { video: [], image: [], other: [] };
+  for (const item of items) {
+    const type =
+      item.type === "video" || item.type === "image" ? item.type : "other";
+    grouped[type].push(item);
+  }
+
+  for (const [type, list] of Object.entries(grouped)) {
+    if (!list.length) continue;
+    const group = document.createElement("div");
+    group.className = "attachment-group";
+
+    const groupSize = formatBytes(
+      list.reduce((sum, item) => sum + (Number(item.sizeBytes) || 0), 0),
+    );
+
+    const title = document.createElement("div");
+    title.className = "attachment-group-title";
+    title.textContent = `${ATTACHMENT_GROUP_LABELS[type]} (${list.length})${groupSize ? ` · ${groupSize}` : ""}`;
+    group.appendChild(title);
+
+    for (const item of list) {
+      const row = document.createElement("label");
+      row.className = "attachment-item";
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = true;
+      checkbox.dataset.name = item.name;
+      checkbox.addEventListener("change", () => {
+        const selected = state.attachmentSelection || [];
+        state.attachmentSelection = checkbox.checked
+          ? [...selected, item.name]
+          : selected.filter((n) => n !== item.name);
+      });
+
+      const name = document.createElement("span");
+      name.className = "attachment-item-name";
+      name.textContent = item.name;
+      const tip = [];
+      if (item.description) tip.push(item.description);
+      if (item.size) tip.push(`Size: ${item.size}`);
+      name.title = tip.join("\n") || item.name;
+
+      const size = document.createElement("span");
+      size.className = "attachment-item-size";
+      size.textContent = item.size || "";
+
+      row.append(checkbox, name, size);
+      group.appendChild(row);
+    }
+
+    attachmentGroups.appendChild(group);
+  }
 }
 
 export function getSourceSite() {
@@ -92,6 +194,7 @@ export const state = {
   bulkRows: [],
   importData: null,
   importExt: null,
+  attachmentSelection: null,
 };
 
 const HTML_ESCAPES = {
@@ -114,6 +217,12 @@ export function escapeHtml(value) {
 export function setStatus(message, status = "info") {
   statusText.textContent = message;
   statusDiv.dataset.state = status;
+  // In-flight status updates drive the shared status bar at the bottom of
+  // the popup. Glide to the bottom so the user actually sees the progress
+  // (and any follow-up rows/cards) instead of it happening below the fold.
+  if (status === "loading") {
+    smoothScrollToBottom();
+  }
 }
 
 export function setBusy(isBusy) {
@@ -217,33 +326,54 @@ export function resetDropzone() {
     "Octane: ID/Name/Description<br/>Spark: Number/Short description/Description";
 }
 
+// The count label and status prompt are recomputed on every row-state change,
+// and a busy worker pool can land several in a single tick. Coalescing them
+// into one rAF pass stops large imports from re-scanning the whole row list
+// (and re-rendering the status text) once per row.
+let selectionCountScheduled = false;
 export function updateSelectionCount() {
-  const selected = state.bulkRows.filter(
-    (r) => !r.checkbox.disabled && r.checkbox.checked,
-  ).length;
-  const processed = state.bulkRows.filter((r) =>
-    ["created", "exists", "error"].includes(r.statusEl.dataset.state),
-  ).length;
+  if (selectionCountScheduled) return;
+  selectionCountScheduled = true;
+  requestAnimationFrame(() => {
+    selectionCountScheduled = false;
 
-  if (selected === 0) {
-    selectionCount.textContent = "";
-  } else {
-    const processedLabel = processed > 0 ? `Processed ${processed}, ` : "";
-    selectionCount.textContent = `${processedLabel}Selected ${selected} of ${state.bulkRows.length}`;
-  }
+    let selected = 0;
+    let processed = 0;
+    let selectable = 0;
+    for (const r of state.bulkRows) {
+      if (!r.checkbox.disabled) {
+        selectable++;
+        if (r.checkbox.checked) selected++;
+      }
+      const rowState = r.statusEl.dataset.state;
+      if (
+        rowState === "created" ||
+        rowState === "exists" ||
+        rowState === "error"
+      ) {
+        processed++;
+      }
+    }
 
-  // While an import is running the progress messages win; only refresh the
-  // resting-state prompt when the user is free to tweak the selection.
-  if (!state.bulkRows.length || importBtn.disabled) return;
+    if (selected === 0) {
+      selectionCount.textContent = "";
+    } else {
+      const processedLabel = processed > 0 ? `Processed ${processed}, ` : "";
+      selectionCount.textContent = `${processedLabel}Selected ${selected} of ${state.bulkRows.length}`;
+    }
 
-  const selectable = state.bulkRows.filter((r) => !r.checkbox.disabled).length;
-  if (selectable === 0) {
-    setStatus("Bulk import done! try different report", "success");
-  } else if (selected > 0) {
-    setStatus("All set - Export selected tickets into JIRA", "info");
-  } else {
-    setStatus("Select the tickets to import.", "info");
-  }
+    // While an import is running the progress messages win; only refresh the
+    // resting-state prompt when the user is free to tweak the selection.
+    if (!state.bulkRows.length || importBtn.disabled) return;
+
+    if (selectable === 0) {
+      setStatus("Bulk import done! try different report", "success");
+    } else if (selected > 0) {
+      setStatus("All set - Export selected tickets into JIRA", "info");
+    } else {
+      setStatus("Select the tickets to import.", "info");
+    }
+  });
 }
 
 export function toggleSelectAll() {
@@ -511,9 +641,16 @@ export function loadBulkRows(rows, site = "Octane") {
   }
 }
 
+// One in-flight glide at a time: rapid progress updates (a busy worker pool,
+// per-row status lines) cancel the previous glide instead of stacking
+// competing animations.
+let scrollFrame = 0;
+
 // Glides the popup's vertical scroll to `target` (a document-body scroll
 // position) with a gentle ease-out curve, so the animation feels deliberate
-// rather than a snap. The target is clamped to the scrollable range.
+// rather than a snap. The target is re-clamped to the scrollable range on
+// every frame, so content that grows mid-glide (preview rows, ticket cards)
+// still lands at the right spot instead of stopping short.
 function smoothScrollTo(target, duration = 420) {
   const scroller = document.body;
   if (
@@ -523,43 +660,29 @@ function smoothScrollTo(target, duration = 420) {
   ) {
     return;
   }
-  const maxScroll = scroller.scrollHeight - scroller.clientHeight;
-  if (!(maxScroll > 0)) return;
+
+  cancelAnimationFrame(scrollFrame);
 
   const start = scroller.scrollTop;
-  const distance = Math.min(Math.max(0, target), maxScroll) - start;
-  if (!distance) return;
-
   const startTime = performance.now();
   const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
   const step = (now) => {
+    const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+    if (!(maxScroll > 0)) return;
+    const liveTarget = Math.min(Math.max(0, target), maxScroll);
     const progress = Math.min(1, (now - startTime) / duration);
-    scroller.scrollTop = start + distance * easeOutCubic(progress);
-    if (progress < 1) requestAnimationFrame(step);
+    scroller.scrollTop = start + (liveTarget - start) * easeOutCubic(progress);
+    if (progress < 1) scrollFrame = requestAnimationFrame(step);
   };
-  requestAnimationFrame(step);
+  scrollFrame = requestAnimationFrame(step);
 }
 
-// Glides the popup to its very bottom (past the status bar).
-function smoothScrollToBottom() {
+// Glides the popup to its very bottom (past the status bar). An unbounded
+// target keeps the glide tracking the live bottom, so a document that is
+// still growing finishes all the way at the end.
+export function smoothScrollToBottom() {
   const scroller = document.body;
   if (!scroller || typeof scroller.scrollTop !== "number") return;
-  smoothScrollTo(scroller.scrollHeight - scroller.clientHeight);
-}
-
-// Glides the popup so `el`'s top edge sits at the top of the viewport. When
-// the content above would push the bottom out of reach, it clamps so the
-// status bar stays visible.
-export function smoothScrollToElement(el, duration = 420) {
-  const scroller = document.body;
-  if (
-    !el ||
-    !scroller ||
-    typeof scroller.scrollTop !== "number" ||
-    typeof scroller.scrollHeight !== "number"
-  ) {
-    return;
-  }
-  const elTop = el.getBoundingClientRect().top + scroller.scrollTop;
-  smoothScrollTo(elTop, duration);
+  smoothScrollTo(Infinity);
 }

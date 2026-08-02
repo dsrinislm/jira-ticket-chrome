@@ -1,32 +1,14 @@
 // Site scraping for the single-ticket flow.
-//
-// The user picks the source site in the popup; the matching site config is
-// scraped through chrome.scripting. All scrapers return a normalized shape:
-// { title, id, source, url, html, images }.
 
-// --- Site config ------------------------------------------------------------
-// Each entry: name (must match the popup's source-site switch and is used
-// for the Jira title prefix), plus DOM selectors for the ticket id, title
-// (string or array — both are accepted), and the description editor.
 const SITES = [
   {
     name: "Octane",
+    // Octane is an SPA: the URL only pins the workspace (?p=), so the site is
+    // deduced from that param alone on both the listing and detail views (no
+    // DOM involved). The entity-id header element exists only on a ticket's
+    // detail view and supplies the id that feeds the REST API, which provides
+    // the name, description, and attachments (octaneApiPath).
     idSelector: ".entity-form-document-view-header-entity-id-container",
-    titleSelectors: [
-      ".entity-form-document-view-header-name-field-container",
-      ".document-view-header-entity-name--custom-label input",
-    ],
-    editorSelector: ".fr-element",
-    // Attachments live behind an "Attachments" tab that lazily renders an
-    // attachments-view once activated. The tab element, the per-file tile,
-    // the download link inside each tile, and the tile's name input.
-    attachmentsTabSelector: '[tab-name="attachments"], [data-aid="mqm-tab-attachments"]',
-    attachmentTileSelector: ".attachment-tile-container",
-    attachmentLinkSelector: "a.download-attachment",
-    attachmentNameSelector: 'input[ng-model="tile.attachment.name"]',
-    // Upload captured attachments without embedding placeholder text in the
-    // description body.
-    embedImages: false,
   },
   {
     name: "Spark",
@@ -34,8 +16,6 @@ const SITES = [
     titleSelectors: 'input[name="incident.short_description"]',
     editorSelector: 'textarea[name="incident.description"]',
     attachmentSelector: ".attachment_list_items .content_editable",
-    // Upload captured attachments without embedding placeholder text in the
-    // description body.
     embedImages: false,
   },
 ];
@@ -45,14 +25,24 @@ export function getSite(name) {
 }
 
 // Runs in the tab's page context: returns the name of the first site whose
-// idSelector and titleSelectors all match the DOM, or null.
+// idSelector and titleSelectors all match the DOM, or null. Octane is deduced
+// from its SPA URL alone (the workspace param in ?p=) — the entity-id header
+// element is never present on the listing page, so detection must not depend
+// on the DOM.
 function detectInPage(sites) {
-  const matches = (selector) => !!document.querySelector(selector);
+  const matches = (selector) =>
+    selector ? !!document.querySelector(selector) : false;
 
   for (const site of sites) {
+    if (!site.idSelector || !site.titleSelectors) continue;
     const idFound = matches(site.idSelector);
     const titleFound = [].concat(site.titleSelectors).some(matches);
     if (idFound && titleFound) return site.name;
+  }
+
+  const octane = sites.find((s) => s.name === "Octane");
+  if (octane && /[?&]p=[^&#/]+\/[^&#]+/.test(location.search || "")) {
+    return "Octane";
   }
 
   return null;
@@ -84,21 +74,228 @@ async function getCurrentTab() {
   return tabs[0];
 }
 
-// Runs in the tab's own page context — it can only reference built-in APIs
-// plus the `site` object passed as an argument. includeAttachments=false
-// skips the attachment capture entirely, so a no-attachments export doesn't
-// pay for clicking the attachments tab and fetching every file.
 export async function scrapeInPage(site, options = {}) {
   const includeAttachments = options.includeAttachments !== false;
-  const textOf = (el) =>
-    el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-      ? el.value
-      : el.textContent;
+  const selectedAttachments = options.selectedAttachments || null;
+  // When false, the scrape only LISTS the selected attachment names without
+  // downloading any bytes. The popup uses this cheap pass to decide which
+  // files a Jira ticket is actually missing before paying for the slow byte
+  // downloads — files that already exist are never fetched.
+  const captureAttachments = options.captureAttachments !== false;
+
+  const textOf = (el) => {
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      return el.value;
+    }
+    if (!String(el.textContent || "").trim()) {
+      const nested = el.querySelector("input, textarea");
+      if (nested) return textOf(nested);
+    }
+    return el.textContent;
+  };
   const readText = (selector) => {
     const el = document.querySelector(selector);
     return el ? String(textOf(el)).replace(/\s+/g, " ").trim() : null;
   };
 
+  // --- Octane: minimal-DOM id + REST API path --------------------------------
+  // Octane is an SPA: the URL only pins the workspace (?p=<sharedSpace>/<workspace>),
+  // never the ticket — a listing and its detail view can share the same
+  // location. So the ticket id comes from the entity-id header element
+  // (minimal DOM) and the name, description, and attachments are read through
+  // the same-origin REST API (session cookie, identical to the listing
+  // import). The id is never taken from the URL: the SPA can leave a stale id
+  // in the hash on the listing page, so an absent element means "no ticket
+  // open" and the flow returns empty rather than guessing. Runs in the page
+  // context, so it must be self-contained (no module imports). Returns null
+  // when the page can't be read this way.
+  const octaneApiPath = async () => {
+    const contextMatch = /[?&]p=([^&#/]+\/[^&#]+)/.exec(location.search || "");
+    if (!contextMatch) return null;
+    const [sharedSpace, workspace] = contextMatch[1].split("/");
+    if (!sharedSpace || !workspace) return null;
+
+    // Minimal DOM: the entity-id header element. Handles both a plain text
+    // container and one wrapping an input, and extracts the numeric id.
+    const itemId = (() => {
+      if (!site.idSelector) return null;
+      const el = document.querySelector(site.idSelector);
+      if (!el) return null;
+      let raw;
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        raw = el.value;
+      } else {
+        raw = el.textContent;
+        if (!String(raw || "").trim()) {
+          const nested = el.querySelector("input, textarea");
+          if (nested) raw = nested.value;
+        }
+      }
+      const match = /\d+/.exec(String(raw || ""));
+      return match ? match[0] : null;
+    })();
+    if (!itemId) return null;
+
+    const apiBase = `${location.origin}/api/shared_spaces/${sharedSpace}/workspaces/${workspace}`;
+
+    // Downloads a file over the same session and resolves to its data URL.
+    const toDataUrl = async (url) => {
+      const response = await fetch(url, { credentials: "include" });
+      const blob = await response.blob();
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    };
+
+    let response;
+    try {
+      response = await fetch(
+        `${apiBase}/work_items/${itemId}?fields=id,name,description`,
+        { credentials: "include" },
+      );
+    } catch {
+      return null;
+    }
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    if (!data || !String(data.name || "").trim()) return null;
+
+    const raw = String(data.description || "");
+    const plain = !/<[a-zA-Z][^>]*>/.test(raw);
+    const images = [];
+    let html;
+    let text = "";
+    if (plain) {
+      // Plain text comes back escaped so it can flow through htmlToADF.
+      text = raw;
+      html = raw.replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c]);
+    } else {
+      // Rich description — extract embedded images to data URLs and swap in
+      // placeholders, mirroring the DOM path so htmlToADF sees the same shape.
+      const doc = new DOMParser().parseFromString(raw, "text/html");
+      if (captureAttachments) {
+        let imgIndex = 0;
+        for (const imgEl of Array.from(doc.querySelectorAll("img"))) {
+          if (!imgEl.src) {
+            imgEl.remove();
+            continue;
+          }
+          const placeholder = `__JIRA_IMG_${imgIndex++}__`;
+          try {
+            const url = new URL(imgEl.src, location.href).href;
+            const res = await fetch(url, { credentials: "include" });
+            const blob = await res.blob();
+            const dataUrl = await new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = reject;
+              reader.readAsDataURL(blob);
+            });
+            images.push({ placeholder, dataUrl });
+            imgEl.replaceWith(doc.createTextNode(placeholder));
+          } catch {
+            imgEl.remove();
+          }
+        }
+      }
+      html = doc.body ? doc.body.innerHTML : "";
+    }
+
+    // The work item's attachments, listed through the API and downloaded as
+    // data URLs. Each file gets a __JIRA_IMG_n__ placeholder appended to the
+    // html (as <p>, like the DOM path) so the popup uploads it as a Jira
+    // attachment; the optional picker selection narrows which files to take.
+    if (includeAttachments) {
+      const query = `owner_work_item EQ {id EQ ${itemId}}`;
+      let attachments = [];
+      try {
+        const listResponse = await fetch(
+          `${apiBase}/attachments?query=${encodeURIComponent(`"${query}"`)}`,
+          { credentials: "include" },
+        );
+        if (listResponse.ok) {
+          const body = await listResponse.json();
+          attachments = Array.isArray(body?.data) ? body.data : [];
+        }
+      } catch {
+        attachments = [];
+      }
+
+      const kept = attachments.filter(
+        (att) =>
+          att &&
+          att.id != null &&
+          att.exists !== false &&
+          String(att.name || "").trim() &&
+          (!selectedAttachments ||
+            selectedAttachments.includes(String(att.name))),
+      );
+
+      if (captureAttachments === false) {
+        // Metadata pass — names only, no byte downloads.
+        for (const att of kept) images.push({ name: String(att.name) });
+      } else {
+        // Bounded pool over the selected files, keeping source order so each
+        // placeholder still lines up with the file it was captured from.
+        let attImageIndex = 0;
+        let attIndex = 0;
+        const worker = async () => {
+          while (attIndex < kept.length) {
+            const att = kept[attIndex++];
+            const placeholder = `__JIRA_IMG_${attImageIndex++}__`;
+            try {
+              const dataUrl = await toDataUrl(
+                `${apiBase}/attachments/${encodeURIComponent(att.id)}`,
+              );
+              images.push({ placeholder, dataUrl, name: String(att.name) });
+              html += `<p>${placeholder}</p>`;
+            } catch {
+              // Couldn't fetch this file — drop it rather than aborting.
+            }
+          }
+        };
+        await Promise.all(
+          Array.from({ length: Math.min(4, kept.length) }, worker),
+        );
+      }
+    }
+
+    const itemIdText = String(data.id ?? itemId);
+    return {
+      title: `${site.name.toUpperCase()} | ${itemIdText} | ${String(data.name).replace(/\s+/g, " ").trim()}`,
+      id: itemIdText,
+      source: site.name,
+      url: location.href,
+      html,
+      text,
+      images,
+    };
+  };
+
+  if (site.name === "Octane") {
+    const viaApi = await octaneApiPath();
+    if (viaApi) return viaApi;
+    return {
+      title: "",
+      id: "",
+      source: site.name,
+      url: location.href,
+      html: "",
+      images: [],
+    };
+  }
+
+  // --- Spark (ServiceNow): DOM path -----------------------------------------
   const id = readText(site.idSelector);
 
   let title = "";
@@ -112,11 +309,6 @@ export async function scrapeInPage(site, options = {}) {
     }
   }
 
-  // Validation: the selected site's idSelector and titleSelectors must
-  // actually match the DOM. If not, this page isn't a ticket details page
-  // on that QA site — return an empty result so the popup shows
-  // "Open the selected site's ticket details page" instead of creating a
-  // ticket from a random page.
   if (id === null || !titleFound) {
     return {
       title: "",
@@ -133,25 +325,56 @@ export async function scrapeInPage(site, options = {}) {
   const images = [];
   let html = "";
 
-  async function captureUrl(url, name) {
-    const placeholder = `__JIRA_IMG_${images.length}__`;
+  // Downloads a file over the same session and resolves to its data URL.
+  async function fetchDataUrl(url) {
+    const response = await fetch(url, { credentials: "include" });
+    const blob = await response.blob();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
 
+  // One bounded pool shared by every capture step, mirroring the bulk flow's
+  // pacing: single-ticket exports used to fetch files strictly one-by-one,
+  // so a many-attachment ticket took N serial round trips. A small pool
+  // keeps the same session and per-file capture while cutting wall time by
+  // roughly the pool size. Results keep source order so each placeholder
+  // still lines up with the file it was captured from.
+  const MAX_CAPTURE_PAR = 4;
+  let nextImageIndex = 0;
+
+  // Fetches `url` to a data URL, records it in `images`, and returns its
+  // `__JIRA_IMG_n__` placeholder (or null when the fetch failed — a bad
+  // file is dropped rather than aborting the whole capture).
+  async function captureOne(url, name) {
+    const placeholder = `__JIRA_IMG_${nextImageIndex++}__`;
     try {
-      const response = await fetch(url, { credentials: "include" });
-      const blob = await response.blob();
-      const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-
+      const dataUrl = await fetchDataUrl(url);
       images.push({ placeholder, dataUrl, name: name || null });
       return placeholder;
     } catch {
-      // Couldn't fetch this one — drop it rather than aborting the capture.
       return null;
     }
+  }
+
+  // Runs `sources` ({ url, name }[]) through the bounded pool, returning the
+  // placeholders (null per failed source) in the same order as `sources`.
+  async function captureAll(sources) {
+    const out = new Array(sources.length).fill(null);
+    let next = 0;
+    const worker = async () => {
+      while (next < sources.length) {
+        const i = next++;
+        out[i] = await captureOne(sources[i].url, sources[i].name);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(MAX_CAPTURE_PAR, sources.length) }, worker),
+    );
+    return out;
   }
 
   // Clones a container, swaps each <img> for a placeholder, and returns the
@@ -160,61 +383,65 @@ export async function scrapeInPage(site, options = {}) {
     const clone = container.cloneNode(true);
     const imgEls = Array.from(clone.querySelectorAll("img"));
 
-    for (const imgEl of imgEls) {
-      const placeholder = await captureUrl(imgEl.src);
+    const placeholders = await captureAll(
+      imgEls.map((imgEl) => ({ url: imgEl.src, name: null })),
+    );
+    imgEls.forEach((imgEl, i) => {
+      const placeholder = placeholders[i];
       if (placeholder) {
         imgEl.replaceWith(document.createTextNode(placeholder));
       } else {
         imgEl.remove();
       }
-    }
+    });
 
     return clone.innerHTML;
   }
 
   const editor = document.querySelector(site.editorSelector);
 
-  // Raw text of a plain-text editor (e.g. Spark's description textarea) —
-  // kept alongside the escaped html so callers can show it without markup.
+  // Raw text of Spark's plain-text description textarea — kept alongside the
+  // escaped html so callers can show it without markup.
   let text = "";
 
   if (editor) {
-    // Plain text fields (e.g. Spark's description textarea) hold no markup —
-    // capture their value escaped as HTML, since innerHTML would be empty.
-    if (editor instanceof HTMLInputElement || editor instanceof HTMLTextAreaElement) {
-      text = String(editor.value ?? "");
-      html = text.replace(/[&<>"']/g, (c) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      })[c]);
-    } else {
-      // Rich-text editor (e.g. Octane's .fr-element) — extract images and
-      // keep the markup.
-      html = await captureImages(editor);
-    }
+    // The textarea holds no markup — capture its value escaped as HTML, since
+    // innerHTML would be empty.
+    text = String(editor.value ?? "");
+    html = text.replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[c]);
   }
 
-  // Separate attachment containers (e.g. Spark's media attachment list).
-  // A container may be an <a> link whose href points at the image, or an
-  // element holding <img> tags. Each captured image becomes its own
-  // paragraph appended after the description.
   if (includeAttachments && site.attachmentSelector) {
     const containers = Array.from(
       document.querySelectorAll(site.attachmentSelector),
     );
+    const sources = [];
     for (const container of containers) {
       const href = container.getAttribute?.("href");
       if (href) {
         // The link's text content is the attachment's file name.
         const name = (container.textContent || "").trim() || null;
-        const placeholder = await captureUrl(href, name);
-        if (placeholder && site.embedImages !== false) {
-          html += `<p>${placeholder}</p>`;
+        if (selectedAttachments && (!name || !selectedAttachments.includes(name))) {
+          continue;
+        }
+        if (captureAttachments === false) {
+          // Metadata pass — names only, no byte downloads.
+          if (name) images.push({ name });
+        } else {
+          sources.push({ url: href, name });
         }
       } else {
+        if (captureAttachments === false) continue;
+        // Embedded images have no attachment name to match against the
+        // picker, so they follow the toggle rather than the name selection —
+        // except an explicit "deselected everything" still means upload none.
+        if (selectedAttachments && selectedAttachments.length === 0) continue;
         const frag = await captureImages(container);
         if (site.embedImages !== false) {
           const placeholders = Array.from(
@@ -224,42 +451,10 @@ export async function scrapeInPage(site, options = {}) {
         }
       }
     }
-  }
-
-  // Octane keeps attachments behind a lazy "Attachments" tab. The tiles only
-  // render once that tab is activated, so click it, wait for the tiles to
-  // appear, then capture each tile's download link as an attachment.
-  if (includeAttachments && site.attachmentsTabSelector) {
-    const tab = document.querySelector(site.attachmentsTabSelector);
-    if (tab) {
-      const tilesExist = () =>
-        document.querySelector(site.attachmentTileSelector) !== null;
-      if (!tilesExist()) {
-        tab.click();
-        // Poll for the attachments-view to finish rendering the tiles.
-        for (let i = 0; i < 50 && !tilesExist(); i++) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-      }
-
-      const containers = Array.from(
-        document.querySelectorAll(site.attachmentTileSelector),
-      );
-      for (const container of containers) {
-        const link = container.querySelector(site.attachmentLinkSelector);
-        if (!link) continue;
-        const href = link.getAttribute("href");
-        if (!href) continue;
-        const url = new URL(href, location.href).href;
-        const nameInput = container.querySelector(site.attachmentNameSelector);
-        const name =
-          (nameInput && nameInput.value.trim()) ||
-          decodeURIComponent(url.split("/").pop() || "") ||
-          null;
-        const placeholder = await captureUrl(url, name);
-        if (placeholder && site.embedImages !== false) {
-          html += `<p>${placeholder}</p>`;
-        }
+    const placeholders = await captureAll(sources);
+    if (site.embedImages !== false) {
+      for (const placeholder of placeholders) {
+        if (placeholder) html += `<p>${placeholder}</p>`;
       }
     }
   }
@@ -273,6 +468,171 @@ export async function scrapeInPage(site, options = {}) {
     text,
     images,
   };
+}
+
+// Runs in the tab's own page context — same constraints as scrapeInPage.
+// Lists each attachment's name, download url, type and (when available) size
+// WITHOUT fetching the file bytes. This cheap metadata pass feeds the popup's
+// attachment picker, so the user picks which files to upload before the slow
+// byte-by-byte capture ever runs. Octane lists through the REST API (no DOM);
+// Spark reads its attachment-list markup.
+export async function listTicketAttachmentsInPage(site) {
+  const VIDEO_EXTS = new Set([
+    "mp4", "m4v", "mov", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg",
+  ]);
+  const IMAGE_EXTS = new Set([
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff", "ico",
+  ]);
+
+  const sizeOf = (container) => {
+    const m = /([\d.]+\s*(?:KB|MB|GB))/i.exec(container.textContent || "");
+    return m ? m[1] : "";
+  };
+
+  const typeOf = (container, name) => {
+    // Octane tiles carry a data-aid like "video-attachment-tile-<name>".
+    const aid = container.getAttribute?.("data-aid") || "";
+    const byAid = /^(video|image|other)-attachment-tile/.exec(aid);
+    if (byAid) return byAid[1];
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    if (VIDEO_EXTS.has(ext)) return "video";
+    if (IMAGE_EXTS.has(ext)) return "image";
+    return "other";
+  };
+
+  // Octane: the SPA URL only pins the workspace, so the ticket id comes from
+  // the entity-id header element (minimal DOM, never the URL/hash) and the
+  // files are listed through the same REST API the create path uses. The
+  // listing is metadata-only (no file bytes fetched), so the picker stays
+  // cheap. The API supplies size (bytes) and description, so those come
+  // straight through; type is derived from the file extension, and files the
+  // API reports as missing (exists=false) are dropped.
+  if (site.name === "Octane") {
+    const contextMatch = /[?&]p=([^&#/]+\/[^&#]+)/.exec(location.search || "");
+    if (!contextMatch) return [];
+    const [sharedSpace, workspace] = contextMatch[1].split("/");
+    if (!sharedSpace || !workspace) return [];
+
+    let itemId = null;
+    if (site.idSelector) {
+      const el = document.querySelector(site.idSelector);
+      let raw = "";
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        raw = el.value;
+      } else if (el) {
+        raw = el.textContent;
+        if (!String(raw || "").trim()) {
+          const nested = el.querySelector("input, textarea");
+          if (nested) raw = nested.value;
+        }
+      }
+      const match = /\d+/.exec(String(raw || ""));
+      if (match) itemId = match[0];
+    }
+    if (!itemId) return [];
+
+    const apiBase = `${location.origin}/api/shared_spaces/${sharedSpace}/workspaces/${workspace}`;
+    const query = `owner_work_item EQ {id EQ ${itemId}}`;
+    const fields = "id,name,description,client_lock_stamp,size,exists";
+    let data = [];
+    try {
+      const response = await fetch(
+        `${apiBase}/attachments?fields=${encodeURIComponent(fields)}&query=${encodeURIComponent(`"${query}"`)}`,
+        { credentials: "include" },
+      );
+      if (response.ok) {
+        const body = await response.json();
+        data = Array.isArray(body?.data) ? body.data : [];
+      }
+    } catch {
+      return [];
+    }
+
+    // The API reports byte sizes, so format them once here for the picker.
+    const formatFileSize = (bytes) => {
+      const n = Number(bytes);
+      if (!Number.isFinite(n) || n < 0) return "";
+      if (n < 1024) return `${n} B`;
+      const units = ["KB", "MB", "GB", "TB"];
+      let size = n;
+      let unit = "B";
+      for (const u of units) {
+        size /= 1024;
+        unit = u;
+        if (size < 1024) break;
+      }
+      return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
+    };
+
+    return data
+      .filter(
+        (att) =>
+          att &&
+          att.id != null &&
+          att.exists !== false &&
+          String(att?.name || "").trim(),
+      )
+      .map((att) => {
+        const name = String(att.name);
+        const ext = (name.split(".").pop() || "").toLowerCase();
+        const type = VIDEO_EXTS.has(ext)
+          ? "video"
+          : IMAGE_EXTS.has(ext)
+            ? "image"
+            : "other";
+        const sizeBytes = Number(att.size);
+        return {
+          name,
+          url: `${apiBase}/attachments/${encodeURIComponent(att.id)}`,
+          type,
+          size: formatFileSize(sizeBytes),
+          sizeBytes:
+            Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
+          description: String(att.description || "").trim(),
+        };
+      });
+  }
+
+  const items = [];
+
+  if (site.attachmentSelector) {
+    for (const container of Array.from(
+      document.querySelectorAll(site.attachmentSelector),
+    )) {
+      const href = container.getAttribute?.("href");
+      const name = (container.textContent || "").trim();
+      if (!href || !name) continue;
+      items.push({
+        name,
+        url: new URL(href, location.href).href,
+        type: typeOf(container, name),
+        size: sizeOf(container),
+      });
+    }
+  }
+
+  return items;
+}
+
+
+export async function listTicketAttachmentsInTab(siteName) {
+  const site = getSite(siteName);
+  if (!site) return [];
+
+  const currentTab = await getCurrentTab();
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: currentTab.id, allFrames: true },
+    func: listTicketAttachmentsInPage,
+    args: [site],
+  });
+
+  // Prefer the frame that actually found attachments, then any result.
+  return (
+    results.map((r) => r.result).find((r) => r && r.length > 0) ||
+    (results[0] && results[0].result) ||
+    []
+  );
 }
 
 // Runs the site scraper against an arbitrary tab. Used by the single-ticket
@@ -394,12 +754,21 @@ function detectTabStateInPage(sites) {
 
   let site = null;
   for (const s of sites) {
+    if (!s.idSelector || !s.titleSelectors) continue;
     const idFound = matches(s.idSelector);
     const titleFound = [].concat(s.titleSelectors).some(matches);
     if (idFound && titleFound) {
       site = s.name;
       break;
     }
+  }
+
+  // Same URL-only Octane signal as detectInPage — the SPA never leaves the
+  // ticket in the location, and the entity-id header element isn't present on
+  // the listing page, so the workspace param alone marks Octane on both the
+  // listing and detail views.
+  if (!site && /[?&]p=[^&#/]+\/[^&#]+/.test(location.search || "")) {
+    site = "Octane";
   }
 
   let listing = null;
@@ -843,9 +1212,4 @@ export async function fetchListingDetailsInTab(ids, site) {
   return out.items || [];
 }
 
-export {
-  getPageData,
-  detectSiteInTab,
-  detectInPage,
-  SITES,
-};
+export { getPageData, detectSiteInTab };

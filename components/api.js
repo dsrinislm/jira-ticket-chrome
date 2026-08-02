@@ -332,7 +332,6 @@ async function listIssueAttachments(jiraBaseUrl, issueKey) {
 }
 
 export {
-  jiraFetch,
   isJiraLoggedIn,
   validateProject,
   findExistingJiraIssue,
