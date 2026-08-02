@@ -59,6 +59,7 @@ import {
   findExistingJiraIssue,
   uploadJiraAttachment,
   updateJiraIssueDescription,
+  listIssueAttachments,
 } from "./components/api.js";
 import {
   getPageData,
@@ -443,42 +444,79 @@ async function ensureJiraReady(jiraOrigin, projectKey) {
   return true;
 }
 
-// Uploads the scraped page's captured images and swaps their placeholders
-// in the description body for the real attachment media nodes. Uploads run
-// through a small bounded pool — Jira has no bulk attachment endpoint, so
-// many small files are faster batched than strung one after another.
-async function attachImagesToIssue(jiraOrigin, issueKey, images, description) {
-  setStatus("Uploading images...", "loading");
+// Maps a blob's MIME sub-type to a safe file extension. BMPs are served by
+// ServiceNow under several aliases (image/x-ms-bmp etc.) that would otherwise
+// produce a bogus fallback filename like "img.x-ms-bmp".
+function extensionForBlobType(blobType) {
+  const sub = (String(blobType).split("/")[1] || "")
+    .split("+")[0]
+    .toLowerCase();
+  return (
+    { "x-ms-bmp": "bmp", "x-bmp": "bmp", "x-windows-bmp": "bmp" }[sub] ||
+    sub ||
+    "png"
+  );
+}
 
+// The upload filename an image maps to on the Jira issue — shared by the
+// uploader and the "upload only what's missing" retry so both agree on names.
+function imageUploadFilename(img) {
+  return (
+    img.name || `${img.placeholder}.${extensionForBlobType(dataUrlToBlob(img.dataUrl).type)}`
+  );
+}
+
+// Uploads a batch of images to a Jira issue through a small bounded pool
+// (Jira has no bulk attachment endpoint — many small files are faster
+// batched than strung one after another). Never touches the description.
+// Returns the uploaded attachments by placeholder plus a failure report.
+async function uploadImages(jiraOrigin, issueKey, images) {
   const byPlaceholder = {};
   const MAX_CONCURRENT = 4;
   let next = 0;
+  let failed = 0;
+  let firstError = "";
+  const failedImages = [];
 
   const uploadOne = async () => {
     while (next < images.length) {
       const img = images[next++];
+      const filename = imageUploadFilename(img);
       try {
-        const blob = dataUrlToBlob(img.dataUrl);
-        const ext = (blob.type.split("/")[1] || "png").split("+")[0];
-        const filename = img.name || `${img.placeholder}.${ext}`;
         const attachment = await uploadJiraAttachment(
           jiraOrigin,
           issueKey,
-          blob,
+          dataUrlToBlob(img.dataUrl),
           filename,
         );
         byPlaceholder[img.placeholder] = fileMediaNode(attachment);
       } catch (err) {
-        console.error("Image upload failed:", img.placeholder, err);
+        failed++;
+        if (!firstError) firstError = err.message || String(err);
+        failedImages.push(img);
+        console.error("Image upload failed:", img.placeholder, filename, err);
       }
     }
   };
 
   await Promise.all(
-    Array.from(
-      { length: Math.min(MAX_CONCURRENT, images.length) },
-      uploadOne,
-    ),
+    Array.from({ length: Math.min(MAX_CONCURRENT, images.length) }, uploadOne),
+  );
+
+  return { byPlaceholder, failed, firstError, failedImages };
+}
+
+// Uploads the scraped page's captured images and swaps their placeholders
+// in the description body for the real attachment media nodes.
+// Returns how many uploads failed (and the first error) so callers can
+// surface "image missed" instead of dropping it silently.
+async function attachImagesToIssue(jiraOrigin, issueKey, images, description) {
+  setStatus("Uploading images...", "loading");
+
+  const { byPlaceholder, failed, firstError } = await uploadImages(
+    jiraOrigin,
+    issueKey,
+    images,
   );
 
   setStatus("Attaching images to ticket...", "loading");
@@ -488,6 +526,30 @@ async function attachImagesToIssue(jiraOrigin, issueKey, images, description) {
     issueKey,
     insertUploadedImages(description.content, byPlaceholder),
   );
+
+  return { failed, firstError };
+}
+
+// Retries the attachments of an already-created ticket: uploads only the
+// images whose filename isn't already attached to the issue, so a retry
+// never duplicates the uploads that already succeeded. The description is
+// left untouched — it was finalized when the ticket was first created.
+async function uploadMissingAttachments(jiraOrigin, issueKey, images) {
+  const existing = new Set(await listIssueAttachments(jiraOrigin, issueKey));
+  const missing = images.filter(
+    (img) => !existing.has(imageUploadFilename(img)),
+  );
+
+  if (!missing.length) {
+    return { failed: 0, firstError: "", skipped: images.length };
+  }
+
+  const { failed, firstError } = await uploadImages(
+    jiraOrigin,
+    issueKey,
+    missing,
+  );
+  return { failed, firstError, skipped: images.length - missing.length };
 }
 
 // Bulk flow #2 — no report file needed. The user ticks rows on a supported
@@ -670,23 +732,30 @@ async function runListingImport(site) {
               issueDescription,
             );
 
+            let attachFailed = 0;
             if (detail.images?.length) {
-              await attachImagesToIssue(
+              const attachReport = await attachImagesToIssue(
                 jiraOrigin,
                 issue.key,
                 detail.images,
                 issueDescription,
               );
+              attachFailed = attachReport.failed;
             }
 
             const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
             setRowStatus(
               row,
               "created",
-              `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>`,
+              `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>${attachFailed ? ` — ${attachFailed} attachment(s) failed to upload` : ""}`,
             );
             counters.created++;
-            setStatus(`Created ${issue.key}.`, "success");
+            setStatus(
+              attachFailed
+                ? `Created ${issue.key} (${attachFailed} attachment(s) failed to upload).`
+                : `Created ${issue.key}.`,
+              attachFailed ? "error" : "success",
+            );
           } catch (err) {
             console.error(`${flowSite} import failed for`, items[index].id, err);
             setRowStatus(row, "error", escapeHtml(err.message || "Failed"));
@@ -783,7 +852,39 @@ async function createTicket() {
 
     if (existing.issue) {
       const issueUrl = `${jiraOrigin}/browse/${existing.issue.key}`;
-      setStatus(`Ticket already exists: ${existing.issue.key}`, "success");
+
+      // A previous create may have left some attachments behind (e.g. a
+      // transient 401 on one upload). Retrying should only upload what's
+      // actually missing — never re-upload what's already on the issue.
+      if (pageData.images?.length) {
+        setStatus(
+          `Uploading missing attachments for ${existing.issue.key}...`,
+          "loading",
+        );
+        const attachReport = await uploadMissingAttachments(
+          jiraOrigin,
+          existing.issue.key,
+          pageData.images,
+        );
+        if (attachReport.failed > 0) {
+          setStatus(
+            `${attachReport.failed} attachment(s) still failed to upload (${attachReport.firstError}).`,
+            "error",
+          );
+          renderTicketCard(existing.issue.key, issueUrl);
+          saveProjectHistory(projectKey);
+          return;
+        }
+        setStatus(
+          attachReport.skipped > 0
+            ? `Ticket already exists: ${existing.issue.key}. Attachments up to date.`
+            : `Ticket already exists: ${existing.issue.key}. Missing attachments uploaded.`,
+          "success",
+        );
+      } else {
+        setStatus(`Ticket already exists: ${existing.issue.key}`, "success");
+      }
+
       renderTicketCard(existing.issue.key, issueUrl);
       saveProjectHistory(projectKey);
       return;
@@ -806,8 +907,9 @@ async function createTicket() {
       issueDescription,
     );
 
+    let attachReport = { failed: 0 };
     if (pageData.images?.length) {
-      await attachImagesToIssue(
+      attachReport = await attachImagesToIssue(
         jiraOrigin,
         issue.key,
         pageData.images,
@@ -816,7 +918,14 @@ async function createTicket() {
     }
 
     const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
-    setStatus(`Created ${issue.key}.`, "success");
+    if (attachReport.failed > 0) {
+      setStatus(
+        `Created ${issue.key}, but ${attachReport.failed} attachment(s) failed to upload (${attachReport.firstError}).`,
+        "error",
+      );
+    } else {
+      setStatus(`Created ${issue.key}.`, "success");
+    }
     renderTicketCard(issue.key, issueUrl);
     saveProjectHistory(projectKey);
   } catch (error) {
@@ -826,3 +935,5 @@ async function createTicket() {
     setBusy(false);
   }
 }
+
+export { attachImagesToIssue, uploadMissingAttachments, uploadImages };

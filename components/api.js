@@ -228,7 +228,31 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
   return responseData;
 }
 
+// Jira decides each attachment's type from the multipart part's Content-Type
+// and the filename's extension. ServiceNow frequently serves BMP files (and
+// other images) with a generic or missing Content-Type, so the blob carries
+// e.g. `application/octet-stream` and Jira drops the .bmp as unknown. When
+// that happens, re-type the blob from the filename's extension.
+const FILE_TYPE_BY_EXT = {
+  bmp: "image/bmp",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  gif: "image/gif",
+  webp: "image/webp",
+  svg: "image/svg+xml",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  ico: "image/x-icon",
+};
+
 async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename) {
+  const ext = (String(filename).split(".").pop() || "").toLowerCase();
+  const wantedType = FILE_TYPE_BY_EXT[ext];
+  if (wantedType && (!blob.type || blob.type === "application/octet-stream")) {
+    blob = new Blob([blob], { type: wantedType });
+  }
+
   const formData = new FormData();
   formData.append("file", blob, filename);
 
@@ -271,6 +295,20 @@ async function updateJiraIssueDescription(jiraBaseUrl, issueKey, contentNodes) {
     throw new Error(`Attaching images failed (status ${response.status}).`);
 }
 
+// Returns the filenames already attached to a Jira issue. Used when a
+// partially-failed create is retried so only the attachments that are
+// actually missing get uploaded — never re-uploading what's already there.
+async function listIssueAttachments(jiraBaseUrl, issueKey) {
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=attachment`,
+  );
+  if (!response.ok) throw new Error(`Couldn't list attachments (status ${response.status}).`);
+  const data = await response.json();
+  const attachments = data?.fields?.attachment;
+  return Array.isArray(attachments) ? attachments.map((a) => a.filename) : [];
+}
+
 export {
   jiraFetch,
   isJiraLoggedIn,
@@ -279,4 +317,5 @@ export {
   createJiraIssue,
   uploadJiraAttachment,
   updateJiraIssueDescription,
+  listIssueAttachments,
 };
