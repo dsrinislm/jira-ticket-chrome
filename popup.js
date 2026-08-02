@@ -38,6 +38,7 @@ import {
   listingImportLabel,
   setActiveListingSite,
   getActiveListingSite,
+  getIncludeAttachments,
   state,
   escapeHtml,
   showLoginButton,
@@ -791,11 +792,16 @@ async function createTicket() {
     const { jiraOrigin, projectKey } = getJiraContext() || {};
     if (!jiraOrigin || !projectKey) return;
 
+    // Only scrape (and later upload) the ticket's attachments when the user
+    // opted in — capturing every file from the attachments tab is the slow
+    // part of an export, so a no-attachments ticket skips it entirely.
+    const includeAttachments = getIncludeAttachments();
+
     setStatus("Reading active QA ticket...", "loading");
 
     let pageData;
     try {
-      pageData = await getPageData(getSourceSite());
+      pageData = await getPageData(getSourceSite(), { includeAttachments });
     } catch {
       pageData = null;
     }
@@ -856,7 +862,7 @@ async function createTicket() {
       // A previous create may have left some attachments behind (e.g. a
       // transient 401 on one upload). Retrying should only upload what's
       // actually missing — never re-upload what's already on the issue.
-      if (pageData.images?.length) {
+      if (includeAttachments && pageData.images?.length) {
         setStatus(
           `Uploading missing attachments for ${existing.issue.key}...`,
           "loading",
@@ -908,7 +914,7 @@ async function createTicket() {
     );
 
     let attachReport = { failed: 0 };
-    if (pageData.images?.length) {
+    if (includeAttachments && pageData.images?.length) {
       attachReport = await attachImagesToIssue(
         jiraOrigin,
         issue.key,

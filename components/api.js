@@ -229,10 +229,11 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
 }
 
 // Jira decides each attachment's type from the multipart part's Content-Type
-// and the filename's extension. ServiceNow frequently serves BMP files (and
-// other images) with a generic or missing Content-Type, so the blob carries
-// e.g. `application/octet-stream` and Jira drops the .bmp as unknown. When
-// that happens, re-type the blob from the filename's extension.
+// and the filename's extension. QA sites frequently serve attachments (BMP
+// images on ServiceNow, MP4/MOV videos on Octane) with a generic or missing
+// Content-Type, so the blob carries e.g. `application/octet-stream` and Jira
+// drops the file as unknown. When that happens, re-type the blob from the
+// filename's extension.
 const FILE_TYPE_BY_EXT = {
   bmp: "image/bmp",
   jpg: "image/jpeg",
@@ -244,6 +245,27 @@ const FILE_TYPE_BY_EXT = {
   tif: "image/tiff",
   tiff: "image/tiff",
   ico: "image/x-icon",
+  mp4: "video/mp4",
+  m4v: "video/x-m4v",
+  mov: "video/quicktime",
+  avi: "video/x-msvideo",
+  mkv: "video/x-matroska",
+  webm: "video/webm",
+  wmv: "video/x-ms-wmv",
+  flv: "video/x-flv",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  m4a: "audio/mp4",
+  aac: "audio/aac",
+  pdf: "application/pdf",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  zip: "application/zip",
+  txt: "text/plain",
 };
 
 async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename) {

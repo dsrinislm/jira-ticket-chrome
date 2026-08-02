@@ -17,6 +17,15 @@ export const createTicketBtn = el("createTicket");
 export const sourceSiteSwitch = el("sourceSiteSwitch");
 export const sourceSiteInput = el("sourceSiteInput");
 export const sourceSiteLabels = document.querySelectorAll(".site-toggle-label");
+export const includeAttachmentsInput = el("includeAttachments");
+
+export function getIncludeAttachments() {
+  return includeAttachmentsInput.checked;
+}
+
+export function setIncludeAttachments(checked) {
+  includeAttachmentsInput.checked = Boolean(checked);
+}
 
 export function getSourceSite() {
   return sourceSiteInput.checked ? "Spark" : "Octane";
@@ -112,6 +121,7 @@ export function setBusy(isBusy) {
   createTicketBtn.dataset.loading = isBusy ? "true" : "false";
   jiraBaseUrlInput.disabled = isBusy;
   projectKeyInput.disabled = isBusy;
+  includeAttachmentsInput.disabled = isBusy;
 }
 
 // When every row in the uploaded file has been created or already existed,

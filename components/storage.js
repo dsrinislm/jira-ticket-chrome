@@ -3,6 +3,8 @@ import {
   projectKeyInput,
   setSourceSite,
   getSourceSite,
+  setIncludeAttachments,
+  getIncludeAttachments,
   projectTagsContainer,
   escapeHtml,
 } from "./ui.js";
@@ -11,11 +13,14 @@ import {
 // get() calls (settings + project history) racing independently.
 export function loadInitialState() {
   chrome.storage.local.get(
-    ["jiraBaseUrl", "projectKey", "sourceSite", "projectHistory"],
+    ["jiraBaseUrl", "projectKey", "sourceSite", "includeAttachments", "projectHistory"],
     (data) => {
       if (data.jiraBaseUrl) jiraBaseUrlInput.value = data.jiraBaseUrl;
       if (data.projectKey) projectKeyInput.value = data.projectKey;
       if (data.sourceSite) setSourceSite(data.sourceSite);
+      if (typeof data.includeAttachments === "boolean") {
+        setIncludeAttachments(data.includeAttachments);
+      }
       // Don't validate/show errors here — the user hasn't touched the
       // field yet, so this only takes effect after blur.
 
@@ -29,6 +34,7 @@ export function saveSettings() {
     jiraBaseUrl: jiraBaseUrlInput.value.trim(),
     projectKey: projectKeyInput.value.trim(),
     sourceSite: getSourceSite(),
+    includeAttachments: getIncludeAttachments(),
   });
 }
 

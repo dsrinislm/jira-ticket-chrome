@@ -17,6 +17,16 @@ const SITES = [
       ".document-view-header-entity-name--custom-label input",
     ],
     editorSelector: ".fr-element",
+    // Attachments live behind an "Attachments" tab that lazily renders an
+    // attachments-view once activated. The tab element, the per-file tile,
+    // the download link inside each tile, and the tile's name input.
+    attachmentsTabSelector: '[tab-name="attachments"], [data-aid="mqm-tab-attachments"]',
+    attachmentTileSelector: ".attachment-tile-container",
+    attachmentLinkSelector: "a.download-attachment",
+    attachmentNameSelector: 'input[ng-model="tile.attachment.name"]',
+    // Upload captured attachments without embedding placeholder text in the
+    // description body.
+    embedImages: false,
   },
   {
     name: "Spark",
@@ -75,8 +85,11 @@ async function getCurrentTab() {
 }
 
 // Runs in the tab's own page context — it can only reference built-in APIs
-// plus the `site` object passed as an argument.
-export async function scrapeInPage(site) {
+// plus the `site` object passed as an argument. includeAttachments=false
+// skips the attachment capture entirely, so a no-attachments export doesn't
+// pay for clicking the attachments tab and fetching every file.
+export async function scrapeInPage(site, options = {}) {
+  const includeAttachments = options.includeAttachments !== false;
   const textOf = (el) =>
     el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
       ? el.value
@@ -188,7 +201,7 @@ export async function scrapeInPage(site) {
   // A container may be an <a> link whose href points at the image, or an
   // element holding <img> tags. Each captured image becomes its own
   // paragraph appended after the description.
-  if (site.attachmentSelector) {
+  if (includeAttachments && site.attachmentSelector) {
     const containers = Array.from(
       document.querySelectorAll(site.attachmentSelector),
     );
@@ -213,6 +226,44 @@ export async function scrapeInPage(site) {
     }
   }
 
+  // Octane keeps attachments behind a lazy "Attachments" tab. The tiles only
+  // render once that tab is activated, so click it, wait for the tiles to
+  // appear, then capture each tile's download link as an attachment.
+  if (includeAttachments && site.attachmentsTabSelector) {
+    const tab = document.querySelector(site.attachmentsTabSelector);
+    if (tab) {
+      const tilesExist = () =>
+        document.querySelector(site.attachmentTileSelector) !== null;
+      if (!tilesExist()) {
+        tab.click();
+        // Poll for the attachments-view to finish rendering the tiles.
+        for (let i = 0; i < 50 && !tilesExist(); i++) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      }
+
+      const containers = Array.from(
+        document.querySelectorAll(site.attachmentTileSelector),
+      );
+      for (const container of containers) {
+        const link = container.querySelector(site.attachmentLinkSelector);
+        if (!link) continue;
+        const href = link.getAttribute("href");
+        if (!href) continue;
+        const url = new URL(href, location.href).href;
+        const nameInput = container.querySelector(site.attachmentNameSelector);
+        const name =
+          (nameInput && nameInput.value.trim()) ||
+          decodeURIComponent(url.split("/").pop() || "") ||
+          null;
+        const placeholder = await captureUrl(url, name);
+        if (placeholder && site.embedImages !== false) {
+          html += `<p>${placeholder}</p>`;
+        }
+      }
+    }
+  }
+
   return {
     title: jiraTitle,
     id,
@@ -227,7 +278,7 @@ export async function scrapeInPage(site) {
 // Runs the site scraper against an arbitrary tab. Used by the single-ticket
 // flow on the current tab and by the bulk flow on detail pages that are
 // opened in background tabs.
-export async function scrapeTab(tabId, siteName) {
+export async function scrapeTab(tabId, siteName, options = {}) {
   const site = getSite(siteName);
 
   if (!site) {
@@ -239,19 +290,19 @@ export async function scrapeTab(tabId, siteName) {
   const results = await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
     func: scrapeInPage,
-    args: [site],
+    args: [site, options],
   });
 
   return (results.find((r) => r.result?.title) || results[0])?.result;
 }
 
-async function getPageData(siteName) {
+async function getPageData(siteName, options = {}) {
   if (!getSite(siteName)) {
     throw new Error("Select a source site (Octane or Spark).");
   }
 
   const currentTab = await getCurrentTab();
-  return scrapeTab(currentTab.id, siteName);
+  return scrapeTab(currentTab.id, siteName, options);
 }
 
 // --- Octane listing page ------------------------------------------------------
