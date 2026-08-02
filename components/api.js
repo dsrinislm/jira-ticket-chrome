@@ -1,14 +1,59 @@
 import { redirectToLogin } from "./ui.js";
+import { sleep } from "./util.js";
 
-async function jiraFetch(jiraBaseUrl, path, options = {}) {
-  return fetch(`${jiraBaseUrl}${path}`, {
-    credentials: "include",
-    headers: {
-      Accept: "application/json",
-      ...(options.headers || {}),
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+
+// Wraps fetch with a single bounded retry for transient failures: network
+// drops (a TypeError — what browsers surface as "Failed to fetch") and the
+// statuses that usually mean "try again" (rate limit, gateway hiccup). One
+// retry keeps a genuinely dead server from stalling the import.
+// `retryStatus` is off for non-idempotent writes (issue create, attachment
+// upload) where a re-send could duplicate — those still retry the
+// network-level rejection, which almost always means the request never
+// reached the server.
+async function fetchWithRetry(
+  url,
+  options = {},
+  { attempts = 2, retryStatus = true } = {},
+) {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) await sleep(300 * attempt + Math.random() * 200);
+
+    let response;
+    try {
+      response = await fetch(url, options);
+    } catch (err) {
+      lastError = err;
+      continue;
+    }
+
+    if (retryStatus && RETRYABLE_STATUS.has(response.status)) {
+      lastError = new Error(`HTTP ${response.status}`);
+      continue;
+    }
+    return response;
+  }
+
+  if (lastError?.name === "TypeError") {
+    throw new Error("Network error — check your connection and try again.");
+  }
+  throw lastError || new Error("Request failed.");
+}
+
+async function jiraFetch(jiraBaseUrl, path, options = {}, fetchOpts = {}) {
+  return fetchWithRetry(
+    `${jiraBaseUrl}${path}`,
+    {
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        ...(options.headers || {}),
+      },
+      ...options,
     },
-    ...options,
-  });
+    fetchOpts,
+  );
 }
 
 async function isJiraLoggedIn(jiraBaseUrl) {
@@ -142,14 +187,21 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
     },
   };
 
-  const response = await jiraFetch(jiraBaseUrl, "/rest/api/3/issue", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Atlassian-Token": "no-check",
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    "/rest/api/3/issue",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Atlassian-Token": "no-check",
+      },
+      body: JSON.stringify(payload),
     },
-    body: JSON.stringify(payload),
-  });
+    // Re-sending a create could duplicate the issue if the server actually
+    // processed the first attempt — retry the network drop, not HTTP errors.
+    { retryStatus: false },
+  );
 
   if (response.status === 401 || response.status === 403) {
     const sessionValid = await isJiraLoggedIn(jiraBaseUrl);
@@ -180,7 +232,7 @@ async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename) {
   const formData = new FormData();
   formData.append("file", blob, filename);
 
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `${jiraBaseUrl}/rest/api/3/issue/${issueKey}/attachments`,
     {
       method: "POST",
@@ -192,6 +244,7 @@ async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename) {
       },
       body: formData,
     },
+    { retryStatus: false },
   );
 
   if (!response.ok)

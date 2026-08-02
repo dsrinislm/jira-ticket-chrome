@@ -362,10 +362,16 @@ function createClampedCell(text, className) {
   return wrapper;
 }
 
-// After the preview renders, hide the "more" toggle on any cell whose text
-// already fits within the 3-line clamp.
-function updateClampToggles() {
+// Hides the "more" toggle on any cell whose text already fits within the
+// 3-line clamp. addBulkRow requests this after every row, so a single
+// pending flag coalesces a whole batch (Excel load, listing import) into
+// one measurement pass instead of one rAF + full re-scan per row.
+let clampUpdateScheduled = false;
+function scheduleClampUpdate() {
+  if (clampUpdateScheduled) return;
+  clampUpdateScheduled = true;
   requestAnimationFrame(() => {
+    clampUpdateScheduled = false;
     document.querySelectorAll(".clamp-cell").forEach((cell) => {
       const span = cell.querySelector(".clamped");
       const toggle = cell.querySelector(".row-toggle");
@@ -376,10 +382,10 @@ function updateClampToggles() {
   });
 }
 
-// Adds a single row to the bulk preview and returns it. Used both by
-// loadBulkRows (Excel reports render all rows at once) and by the Octane
-// page flow, which lists each scraped ticket as it is processed.
-export function addBulkRow(record, site = "Octane") {
+// Builds a single preview row without touching the DOM tree, returning
+// { tr, row }. addBulkRow appends it immediately (streaming listing flow);
+// loadBulkRows collects the tr's into a fragment for one bulk append.
+function buildBulkRow(record, site = "Octane") {
   const siteTag = String(site || "Octane").toUpperCase();
   const titleParts = [siteTag, record.idText, record.name].filter(Boolean);
   const title = record.title || titleParts.join(" | ");
@@ -430,7 +436,6 @@ export function addBulkRow(record, site = "Octane") {
   statusTd.textContent = "Not started";
 
   tr.append(checkTd, idTd, titleTd, descTd, statusTd);
-  previewBody.appendChild(tr);
 
   const row = {
     rowIndex: record.rowIndex,
@@ -447,10 +452,19 @@ export function addBulkRow(record, site = "Octane") {
   };
   state.bulkRows.push(row);
 
+  return { tr, row };
+}
+
+// Adds a single row to the bulk preview and returns it. Used both by
+// loadBulkRows (Excel reports render all rows at once) and by the Octane
+// page flow, which lists each scraped ticket as it is processed.
+export function addBulkRow(record, site = "Octane") {
+  const { tr, row } = buildBulkRow(record, site);
+  previewBody.appendChild(tr);
   previewSection.style.display = "block";
   selectAllLabel?.classList.remove("hidden");
   updateSelectionCount();
-  updateClampToggles();
+  scheduleClampUpdate();
 
   return row;
 }
@@ -459,7 +473,18 @@ export function loadBulkRows(rows, site = "Octane") {
   previewBody.innerHTML = "";
   state.bulkRows = [];
 
-  rows.forEach((record) => addBulkRow(record, site));
+  // One bulk append (via a fragment) instead of N separate ones — large
+  // Excel reports render noticeably faster this way.
+  const fragment = document.createDocumentFragment();
+  for (const record of rows) {
+    fragment.appendChild(buildBulkRow(record, site).tr);
+  }
+  previewBody.appendChild(fragment);
+
+  previewSection.style.display = "block";
+  selectAllLabel?.classList.remove("hidden");
+  updateSelectionCount();
+  scheduleClampUpdate();
 
   // The freshly populated preview can push the import CTA and the status
   // message below the fold; glide all the way down so the whole status bar is

@@ -214,12 +214,16 @@ async function applyDetectedState() {
 }
 
 applyDetectedState();
-chrome.tabs.onActivated.addListener(applyDetectedState);
+// A tab switch/navigation can fire onActivated and onUpdated back-to-back
+// (and rapid tab-swiping fires many activations in a row). Debounce so one
+// navigation causes at most one all-frames scan of the final active tab.
+const debouncedDetectState = debounce(applyDetectedState, 150);
+chrome.tabs.onActivated.addListener(debouncedDetectState);
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   // Re-evaluate on every URL change too, not just on full page loads —
   // SPA hash navigation can leave the grid DOM behind while still firing url.
   if (changeInfo.status === "complete" || changeInfo.url) {
-    applyDetectedState();
+    debouncedDetectState();
   }
 });
 

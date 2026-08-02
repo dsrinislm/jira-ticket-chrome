@@ -370,9 +370,15 @@ function detectTabStateInPage(sites) {
 
 // One all-frames scan that detects both the details-page site and the listing
 // site. The single-ticket and listing flows both re-run on every tab/URL
-// change, so detecting them together halves the per-event page work.
+// change, so detecting them together halves the per-event page work. Tabs
+// that can never host a site (chrome://, file://, new-tab, …) are skipped
+// without injecting anything.
 export async function detectTabState() {
   const currentTab = await getCurrentTab();
+  const url = (currentTab?.url || "").trim();
+  if (url && !/^https?:\/\//i.test(url)) {
+    return { site: null, listing: null };
+  }
 
   try {
     const results = await chrome.scripting.executeScript({
@@ -539,6 +545,37 @@ export function fetchListingDetailsInPage(ids, site) {
   let itemUrl;
   let apiName;
 
+  // Bounded retry for transient failures — a flaky network dropping a detail
+  // fetch shouldn't fail the row. Runs in the page context, so it must be
+  // self-contained (no module imports). "Try again" statuses and every
+  // fetch-level rejection are retried with growing backoff.
+  async function fetchWithRetry(url, options, tries = 2) {
+    let lastError;
+    for (let attempt = 0; attempt < tries; attempt++) {
+      if (attempt > 0) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, 300 * attempt + Math.random() * 200),
+        );
+      }
+      let response;
+      try {
+        response = await fetch(url, options);
+      } catch (err) {
+        lastError = err;
+        continue;
+      }
+      if (
+        response.status === 429 ||
+        (response.status >= 500 && response.status <= 599)
+      ) {
+        lastError = new Error(`${apiName} ${response.status}`);
+        continue;
+      }
+      return response;
+    }
+    throw lastError || new Error(`${apiName} fetch failed`);
+  }
+
   if (site === "Spark") {
     apiName = "Spark API";
     itemUrl = (id) => `${location.origin}/nav_to.do?uri=incident.do?sys_id=${id}`;
@@ -569,10 +606,11 @@ export function fetchListingDetailsInPage(ids, site) {
       const headers = userToken ? { "X-UserToken": userToken } : {};
       if (accept) headers.Accept = accept;
       try {
-        const response = await fetch(url, {
-          credentials: "include",
-          headers,
-        });
+        const response = await fetchWithRetry(
+          url,
+          { credentials: "include", headers },
+          2,
+        );
         if (!response.ok) return null;
         const blob = await response.blob();
         return new Promise((resolve, reject) => {
@@ -590,7 +628,7 @@ export function fetchListingDetailsInPage(ids, site) {
     // the details page shows under the attachment section.
     async function fetchSparkAttachments(incidentSysId) {
       try {
-        const response = await fetch(
+        const response = await fetchWithRetry(
           `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(incidentSysId)}&sysparm_fields=sys_id,file_name,content_type&sysparm_display_value=false`,
           { credentials: "include", headers: apiHeaders },
         );
@@ -603,7 +641,7 @@ export function fetchListingDetailsInPage(ids, site) {
     }
 
     fetchItem = async (id) => {
-      const response = await fetch(
+      const response = await fetchWithRetry(
         `${location.origin}/api/now/table/incident/${encodeURIComponent(id)}?sysparm_fields=number,short_description,description&sysparm_display_value=false`,
         { credentials: "include", headers: apiHeaders },
       );
@@ -667,7 +705,7 @@ export function fetchListingDetailsInPage(ids, site) {
     itemUrl = (id) => `${location.href.split("#")[0]}#/entity-navigation?entityType=work_item&id=${id}`;
 
     fetchItem = async (id) => {
-      const response = await fetch(
+      const response = await fetchWithRetry(
         `${apiBase}/work_items/${id}?fields=id,name,description`,
         { credentials: "include" },
       );
