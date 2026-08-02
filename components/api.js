@@ -354,21 +354,32 @@ async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename, onPro
 }
 
 async function updateJiraIssueDescription(jiraBaseUrl, issueKey, contentNodes) {
-  const response = await jiraFetch(
-    jiraBaseUrl,
-    `/rest/api/3/issue/${issueKey}`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        fields: {
-          description: { version: 1, type: "doc", content: contentNodes },
-        },
-      }),
+  const body = JSON.stringify({
+    fields: {
+      description: { version: 1, type: "doc", content: contentNodes },
     },
-  );
-  if (!response.ok)
-    throw new Error(`Attaching images failed (status ${response.status}).`);
+  });
+  const url = `${jiraBaseUrl}/rest/api/3/issue/${issueKey}`;
+
+  // The description embeds media nodes that reference attachments uploaded a
+  // moment ago; Jira can 400 transiently while that upload is still being
+  // indexed, so give it a beat and retry before reporting a failure. The PUT
+  // is idempotent (same description content), so a re-send is safe.
+  let response;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    response = await jiraFetch(
+      jiraBaseUrl,
+      `/rest/api/3/issue/${issueKey}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body,
+      },
+    );
+    if (response.ok) return response;
+    if (attempt < 2) await sleep(600 + attempt * 500);
+  }
+  throw new Error(`Attaching images failed (status ${response.status}).`);
 }
 
 // Returns the filenames already attached to a Jira issue. Used when a

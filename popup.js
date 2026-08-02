@@ -22,8 +22,6 @@ import {
   updateBulkStatusMessage,
   abortImportBtn,
   listingImportBtn,
-  listingImportLabel,
-  setActiveListingSite,
   getActiveListingSite,
   getSourceSite,
   getIncludeAttachments,
@@ -40,10 +38,26 @@ import {
   setAttachmentNote,
   attachmentByteSize,
   MAX_ATTACHMENT_UPLOAD_BYTES,
+  getBulkIncludeAttachments,
+  setBulkPreviewCollapsed,
+  setBulkAttachmentPickerLoading,
+  clearBulkAttachmentPicker,
+  renderBulkAttachmentPicker,
+  setBulkAttachmentNote,
+  isExcelFlowActive,
+  applyListingState,
+  getListingHasSelection,
+  scrollBulkToFirstSelected,
+  bulkAttachmentGroups,
+  bulkAttachmentSelectAll,
+  bulkIncludeAttachments,
 } from "./components/ui.js";
 import { debounce } from "./components/util.js";
 import {
   listTicketAttachmentsInTab,
+  listListingAttachmentsInTab,
+  scrapeSelectedListingInTab,
+  scrapeSelectedSparkListingInTab,
   detectTabState,
 } from "./components/scrape.js";
 import { startGapArt } from "./components/gap-art.js";
@@ -75,7 +89,12 @@ tabSingle.addEventListener("click", () => switchView("single"));
 tabBulk.addEventListener("click", () => switchView("bulk"));
 selectAllCheckbox.addEventListener("change", toggleSelectAll);
 fileInput.addEventListener("change", handleFileSelected);
-importBtn.addEventListener("click", runBulkImport);
+importBtn.addEventListener("click", () => {
+  // Pin the preview to the top of the currently selected batch the moment
+  // the user clicks — no waiting on the async import work.
+  scrollBulkToFirstSelected();
+  runBulkImport();
+});
 listingImportBtn.addEventListener("click", () =>
   runListingImport(getActiveListingSite()),
 );
@@ -99,10 +118,16 @@ jiraBaseUrlInput.addEventListener("input", (e) => {
     projectKeyInput.value.trim()
   ) {
     // After a paste fills both Jira fields, move focus to the next actionable
-    // control for the active view: the upload dropzone when bulk-importing
-    // (e.g. no Spark/Octane ticket open), otherwise the create-ticket CTA.
+    // control for the active view. In the bulk view, focus the "Sync selected
+    // listing" CTA when a listing import can actually run (listing with rows
+    // ticked); otherwise the Excel flow is the only path, so focus the upload
+    // dropzone. In the single view, the create-ticket CTA is the target.
     if (!bulkView.hidden) {
-      fileInput.focus();
+      if (!isExcelFlowActive() && getActiveListingSite() && getListingHasSelection()) {
+        listingImportBtn.focus();
+      } else {
+        fileInput.focus();
+      }
     } else {
       createTicketBtn.focus();
     }
@@ -206,6 +231,99 @@ attachmentSelectAll.addEventListener("change", () => {
     : [];
 });
 
+// Bulk-import "Include attachments" (default OFF) toggles a per-ticket picker:
+// the selected listing rows' attachments are listed (metadata only — no byte
+// downloads) so the user can check exactly which files to upload. The Excel
+// flow has no attachment source, so the section only shows on a listing page.
+bulkIncludeAttachments.addEventListener("change", async () => {
+  if (!getBulkIncludeAttachments()) {
+    clearBulkAttachmentPicker();
+    setBulkPreviewCollapsed(false);
+    return;
+  }
+
+  setBulkPreviewCollapsed(true);
+
+  const site = getActiveListingSite();
+  if (!site) {
+    setStatus("Open a Spark or Octane listing to choose attachments.", "error");
+    clearBulkAttachmentPicker();
+    return;
+  }
+
+  setBulkAttachmentPickerLoading();
+  smoothScrollToBottom();
+
+  try {
+    const items =
+      site === "Spark"
+        ? await scrapeSelectedSparkListingInTab()
+        : await scrapeSelectedListingInTab();
+    if (!getBulkIncludeAttachments()) return; // toggled off while listing
+    if (!items.length) {
+      setStatus(
+        `Tick the rows you want to import on the ${site} page, then enable attachments.`,
+        "error",
+      );
+      bulkAttachmentGroups.innerHTML =
+        '<div class="attachment-group-title">No rows selected on the listing page.</div>';
+      smoothScrollToBottom();
+      return;
+    }
+
+    // Spark rows show the INC number as the group title; Octane keeps the id.
+    const labels = {};
+    for (const item of items) {
+      labels[item.id] = site === "Spark" ? item.number || item.id : item.id;
+    }
+
+    const groups = await listListingAttachmentsInTab(
+      items.map((i) => i.id),
+      site,
+    );
+    if (!getBulkIncludeAttachments()) return; // toggled off while listing
+
+    // Same 26 MB upload cutoff as the single-ticket picker: over-sized files
+    // are never listed (they'd only fail with Jira's 401 gateway error), and
+    // the note still says "over 25 MB" to match the gateway's real ceiling.
+    let skipped = 0;
+    for (const group of groups) {
+      const listable = (group.attachments || []).filter(
+        (a) => attachmentByteSize(a) <= MAX_ATTACHMENT_UPLOAD_BYTES,
+      );
+      skipped += (group.attachments || []).length - listable.length;
+      group.attachments = listable;
+    }
+
+    const note = skipped
+      ? `${skipped} file(s) over 25 MB skipped — add them from the Jira UI.`
+      : "";
+
+    renderBulkAttachmentPicker(groups, labels);
+    setBulkAttachmentNote(note);
+    smoothScrollToBottom();
+  } catch (err) {
+    console.error(err);
+    setStatus("Couldn't list attachments for the selected rows.", "error");
+    bulkAttachmentGroups.innerHTML =
+      '<div class="attachment-group-title">Couldn’t list attachments.</div>';
+    smoothScrollToBottom();
+  }
+});
+
+bulkAttachmentSelectAll.addEventListener("change", () => {
+  const checked = bulkAttachmentSelectAll.checked;
+  const sel = {};
+  bulkAttachmentGroups
+    .querySelectorAll(".attachment-item input[type='checkbox']")
+    .forEach((box) => {
+      box.checked = checked;
+      if (!sel[box.dataset.ticket]) sel[box.dataset.ticket] = [];
+      if (checked) sel[box.dataset.ticket].push(box.dataset.name);
+    });
+  state.bulkAttachmentSelection = sel;
+});
+
 // Lets the user stop an in-flight bulk import. Picked up by the worker
 // pool between rows, so the current row's Jira calls finish first.
 abortImportBtn.addEventListener("click", () => {
@@ -240,28 +358,32 @@ sourceSiteLabels.forEach((label) =>
 async function applyDetectedState() {
   let site = null;
   let listing = null;
+  let selectedCount = 0;
   try {
-    ({ site, listing } = await detectTabState());
+    ({ site, listing, selectedCount } = await detectTabState());
   } catch {
     setSourceSiteVisible(false);
     setSingleTabEnabled(false);
+    applyListingState(null, 0);
     return;
   }
 
-  const matched = site !== null;
-  // The single-ticket flow needs a Spark/Octane ticket in the active tab;
-  // otherwise the "Current Ticket" tab is disabled and only bulk import works.
+  // The single-ticket flow needs an actual Spark/Octane ticket in the active
+  // tab. Octane's workspace URL alone matches the site signal even on the
+  // listing page (where no ticket exists), so the listing check must exclude
+  // it — there the "Current Ticket" tab is disabled and only bulk works.
+  const matched = site !== null && listing === null;
   setSingleTabEnabled(matched);
   // Select first so the lock keeps the right site's button enabled.
   if (matched) setSourceSite(site);
   setSourceSiteVisible(matched);
   setSourceSiteLocked(matched);
 
-  setActiveListingSite(listing);
-  listingImportLabel.textContent = listing
-    ? `Import selected ${listing} listing`
-    : "Import selected listing";
-  listingImportBtn.style.display = listing ? "block" : "none";
+  // Fold the tab's listing state (site + selection) into every
+  // listing-dependent control: the dropzone's clear affordance and the bulk
+  // "Include attachments" section + "Sync selected … listing" CTA (the latter
+  // two only when rows are ticked — otherwise the Excel flow is the only path).
+  applyListingState(listing, selectedCount);
   if (!bulkView.hidden) updateBulkStatusMessage();
 }
 

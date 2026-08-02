@@ -12,9 +12,11 @@ import {
   resetDropzone,
   loadBulkRows,
   unlockBulkImport,
+  applyListingState,
 } from "./ui.js";
 import { validateBulkProjectKey } from "./validation.js";
 import { loadExcelJS, parseSheetRows, buildReport } from "./xlsx.js";
+import { detectTabState } from "./scrape.js";
 
 export function handleFileSelected() {
   const file = fileInput.files[0];
@@ -52,7 +54,13 @@ export function handleFileSelected() {
       }
 
       loadBulkRows(parsed.rows, parsed.site);
-      dropzoneHint.textContent = "Click to select a different report";
+      dropzoneHint.innerHTML = `<span class="dropzone-switch-hint">Click to select different report</span><br/><span class="dropzone-clear-hint">Click clear to switch to ${parsed.site} importing</span>`;
+      // Re-derive the listing state from the tab: the clear affordance only
+      // helps when a site import can actually run, and the listing-only
+      // controls stay hidden while the report is loaded.
+      detectTabState().then(({ listing, selectedCount }) =>
+        applyListingState(listing, selectedCount),
+      );
       fileSummary.textContent = `${parsed.rows.length} row(s) loaded.`;
       validateBulkProjectKey();
     } catch (err) {

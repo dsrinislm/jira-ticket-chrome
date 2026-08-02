@@ -81,7 +81,10 @@
       </label>
       <div id="attachmentPicker" class="attachment-picker" hidden>
         <div class="attachment-picker-header">
-          <span class="attachment-picker-title">Choose attachments to upload</span>
+          <button type="button" class="attachment-picker-collapse" aria-expanded="true">
+            <svg class="attachment-picker-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="attachment-picker-title">Choose attachments to upload</span>
+          </button>
           <label class="attachment-picker-toggle" for="attachmentSelectAll">
             <input id="attachmentSelectAll" type="checkbox" checked />
             Select all
@@ -136,6 +139,16 @@
 
       <label class="file-dropzone" for="fileInput" aria-label="Import Tickets">
         <input id="fileInput" type="file" accept=".xlsx,.xlsm,.xltx,.xltm,.xls" />
+        <button
+          id="clearFileBtn"
+          type="button"
+          class="clear-file-btn"
+          aria-label="Clear uploaded file"
+          title="Clear uploaded file"
+          hidden
+        >
+          <svg class="clear-file-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
         <div class="dropzone-main">
           <svg id="dropzoneIcon" class="dropzone-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2.5" stroke="currentColor" stroke-width="1.8"/><path d="M4 9.5h16M9.5 4v16M14.5 9.5V20" stroke="currentColor" stroke-width="1.8"/></svg>
           <span id="dropzoneTitle" class="dropzone-title">Choose an Excel file</span>
@@ -145,27 +158,53 @@
 
       <p id="fileError" class="field-error" role="alert" style="display: none;"></p>
       <p id="fileSummary" class="file-summary"></p>
+    </section>
 
-      <button id="listingImportBtn" type="button" class="btn-ghost" style="display: none;">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 14h8M12 10v8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        <span id="listingImportLabel">Import selected octane listing</span>
-      </button>
+    <section class="field-block field-block-attachments" id="bulkAttachmentSection" style="display: none;">
+      <label class="attach-toggle" for="bulkIncludeAttachments">
+        <input id="bulkIncludeAttachments" type="checkbox" />
+        <span class="attach-toggle-label">
+          <svg class="field-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m20.5 15.5-6.5 6.5a4.7 4.7 0 0 1-6.6 0L3.6 18.2a4.7 4.7 0 0 1 0-6.6l6.5-6.5a3.6 3.6 0 0 1 5 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m3.5 8.5 6.5-6.5a4.7 4.7 0 0 1 6.6 0l6.4 6.4a4.7 4.7 0 0 1 0 6.6l-6.5 6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          Include attachments
+        </span>
+      </label>
+      <div id="bulkAttachmentPicker" class="attachment-picker" hidden>
+        <div class="attachment-picker-header">
+          <button type="button" class="attachment-picker-collapse" aria-expanded="true">
+            <svg class="attachment-picker-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="attachment-picker-title">Choose attachments to upload</span>
+          </button>
+          <label class="attachment-picker-toggle" for="bulkAttachmentSelectAll">
+            <input id="bulkAttachmentSelectAll" type="checkbox" checked />
+            Select all
+          </label>
+        </div>
+        <div id="bulkAttachmentNote" class="attachment-note" hidden></div>
+        <div id="bulkAttachmentGroups" class="attachment-groups"></div>
+      </div>
     </section>
 
     <section id="previewSection" class="field-block" style="display: none;">
-      <div class="preview-toolbar">
-        <label class="select-all">
-          <input id="selectAllCheckbox" type="checkbox" checked />
-          Select all
-        </label>
-        <span id="selectionCount" class="selection-count"></span>
+      <div class="preview-toolbar attachment-picker-header">
+        <button
+          id="previewCollapseBtn"
+          type="button"
+          class="attachment-picker-collapse"
+          aria-expanded="true"
+        >
+          <svg class="attachment-picker-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="attachment-picker-title">Preview selected tickets</span>
+        </button>
+        <div class="preview-toolbar-right">
+          <span id="selectionCount" class="selection-count"></span>
+        </div>
       </div>
 
       <div class="table-wrap">
         <table id="previewTable">
           <thead>
             <tr>
-              <th class="col-check"></th>
+              <th class="col-check"><span class="select-all"><input id="selectAllCheckbox" type="checkbox" checked aria-label="Select all" /></span></th>
               <th id="previewIdHeader">ID</th>
               <th>Title</th>
               <th>Description preview</th>
@@ -209,6 +248,11 @@
         Download report
       </button>
     </section>
+
+    <button id="listingImportBtn" type="button" class="btn-primary" style="display: none;">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 14h8M12 10v8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <span id="listingImportLabel">Sync selected octane listing</span>
+    </button>
 
     <canvas id="gapArtBulk" class="view-fill gap-art" aria-hidden="true"></canvas>
   </div>

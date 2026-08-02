@@ -142,17 +142,28 @@ export async function attachImagesToIssue(jiraOrigin, issueKey, images, descript
   // appear instead of leaking `__JIRA_IMG_n__` text.
   setStatus("Attaching images to ticket...", "loading");
 
-  await updateJiraIssueDescription(
-    jiraOrigin,
-    issueKey,
-    insertUploadedImages(description.content, byPlaceholder),
-  );
+  // The uploads succeeded — a description-embed failure is cosmetic (the
+  // images are still attached to the ticket), so it must not turn the whole
+  // import into a failure. The embed already retries transient Jira hiccups;
+  // if it still fails, surface it as a warning for the caller to show.
+  let descriptionError = "";
+  try {
+    await updateJiraIssueDescription(
+      jiraOrigin,
+      issueKey,
+      insertUploadedImages(description.content, byPlaceholder),
+    );
+  } catch (err) {
+    descriptionError = err.message || String(err);
+    console.error("Description embed failed:", err);
+  }
 
   return {
     failed,
     firstError,
     failedNames: failedImages.map((img) => imageUploadFilename(img)),
     cancelled,
+    descriptionError,
   };
 }
 

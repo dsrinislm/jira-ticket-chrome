@@ -706,6 +706,145 @@ export async function listTicketAttachmentsInTab(siteName) {
   );
 }
 
+// Lists the attachment files of many selected listing rows at once (metadata
+// only — no bytes). Feeds the bulk-import picker so the user can check exactly
+// which files to upload across every selected ticket. Returns an array of
+// groups — { id, attachments: [{ name, size, sizeBytes, type }] } — one per
+// requested id. Runs in the page context, so it must be self-contained.
+export async function listListingAttachmentsInPage(ids, siteName) {
+  const VIDEO_EXTS = new Set([
+    "mp4", "m4v", "mov", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg",
+  ]);
+  const IMAGE_EXTS = new Set([
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff", "ico",
+  ]);
+  const idList = Array.isArray(ids) ? ids : [ids];
+
+  const formatFileSize = (bytes) => {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n < 0) return "";
+    if (n < 1024) return `${n} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let size = n;
+    let unit = "B";
+    for (const u of units) {
+      size /= 1024;
+      unit = u;
+      if (size < 1024) break;
+    }
+    return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
+  };
+
+  const typeOf = (name) => {
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    if (VIDEO_EXTS.has(ext)) return "video";
+    if (IMAGE_EXTS.has(ext)) return "image";
+    return "other";
+  };
+
+  const rowToItem = (name, bytes) => {
+    const sizeBytes =
+      Number.isFinite(Number(bytes)) && Number(bytes) >= 0 ? Number(bytes) : null;
+    return { name, sizeBytes, size: formatFileSize(sizeBytes), type: typeOf(name) };
+  };
+
+  // Fetches one ticket's attachment metadata; resolves to its item array.
+  // A failed fetch just yields an empty group (the picker then shows the
+  // ticket without files rather than failing the whole listing).
+  let fetchGroup;
+
+  if (siteName === "Spark") {
+    // ServiceNow Table API, authenticated by the page's session cookie plus
+    // its CSRF token (X-UserToken) — runs in the MAIN world via the tab
+    // wrapper, so window.g_ck is visible and no Basic-auth challenge fires.
+    const userToken =
+      (typeof window !== "undefined" && window.g_ck) ||
+      document.querySelector('meta[name="X-UserToken"]')?.content ||
+      document.querySelector('input[name="X-UserToken"]')?.value ||
+      "";
+    const headers = { Accept: "application/json" };
+    if (userToken) headers["X-UserToken"] = userToken;
+
+    fetchGroup = async (id) => {
+      const attachments = [];
+      try {
+        const response = await fetch(
+          `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(id)}&sysparm_fields=file_name,size_bytes&sysparm_display_value=false&sysparm_limit=1000`,
+          { credentials: "include", headers },
+        );
+        if (response.ok) {
+          const json = await response.json();
+          for (const row of Array.isArray(json?.result) ? json.result : []) {
+            const name = String(row?.file_name || "").trim();
+            if (name) attachments.push(rowToItem(name, row?.size_bytes));
+          }
+        }
+      } catch {
+        // leave this ticket's group empty
+      }
+      return attachments;
+    };
+  } else {
+    // Octane: same REST API the create path uses, cookie-only.
+    const contextMatch = /[?&]p=([^&#/]+\/[^&#]+)/.exec(location.search || "");
+    if (!contextMatch) return [];
+    const [sharedSpace, workspace] = contextMatch[1].split("/");
+    if (!sharedSpace || !workspace) return [];
+    const apiBase = `${location.origin}/api/shared_spaces/${sharedSpace}/workspaces/${workspace}`;
+
+    fetchGroup = async (id) => {
+      const attachments = [];
+      const query = `owner_work_item EQ {id EQ ${id}}`;
+      const fields = "id,name,size,exists";
+      try {
+        const response = await fetch(
+          `${apiBase}/attachments?fields=${encodeURIComponent(fields)}&query=${encodeURIComponent(`"${query}"`)}`,
+          { credentials: "include" },
+        );
+        if (response.ok) {
+          const body = await response.json();
+          for (const att of Array.isArray(body?.data) ? body.data : []) {
+            if (!att || att.exists === false) continue;
+            const name = String(att?.name || "").trim();
+            if (name) attachments.push(rowToItem(name, att?.size));
+          }
+        }
+      } catch {
+        // leave this ticket's group empty
+      }
+      return attachments;
+    };
+  }
+
+  // Fetched in parallel but written back into their original slots so the
+  // caller's position-based lookup still matches the requested ids.
+  return Promise.all(
+    idList.map(async (id) => ({ id, attachments: await fetchGroup(id) })),
+  );
+}
+
+// Runs the multi-ticket listing above in the current tab. Spark executes in
+// the MAIN world (its Table API only authenticates from the page's own
+// context — see listTicketAttachmentsInTab); Octane stays isolated.
+export async function listListingAttachmentsInTab(ids, siteName) {
+  const currentTab = await getCurrentTab();
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: currentTab.id, allFrames: true },
+    func: listListingAttachmentsInPage,
+    args: [ids, siteName],
+    world: siteName === "Spark" ? "MAIN" : "ISOLATED",
+  });
+
+  // Prefer the frame that actually found attachments, then any result.
+  const outs = results.map((r) => r.result).filter(Boolean);
+  return (
+    outs.find((r) => r.some((g) => g.attachments?.length > 0)) ||
+    outs.find((r) => r.length > 0) ||
+    []
+  );
+}
+
 // Runs the site scraper against an arbitrary tab. Used by the single-ticket
 // flow on the current tab and by the bulk flow on detail pages that are
 // opened in background tabs.
@@ -856,7 +995,25 @@ function detectTabStateInPage(sites) {
     }
   }
 
-  return { site, listing };
+  // Count the checked listing rows so the popup can tell a listing with
+  // nothing selected from a non-listing tab (both drive the dropzone's clear
+  // affordance, but only the former hides it).
+  let selectedCount = 0;
+  if (listing === "Octane") {
+    document.querySelectorAll("div.slick-row").forEach((row) => {
+      const checkbox = row.querySelector(
+        'div[field-name="isSelected"] input[type="checkbox"]',
+      );
+      if (checkbox && checkbox.checked) selectedCount++;
+    });
+  } else if (listing === "Spark") {
+    document.querySelectorAll("tr.list_row").forEach((row) => {
+      const checkbox = row.querySelector('input[type="checkbox"]');
+      if (checkbox && checkbox.checked) selectedCount++;
+    });
+  }
+
+  return { site, listing, selectedCount };
 }
 
 // One all-frames scan that detects both the details-page site and the listing
@@ -881,9 +1038,13 @@ export async function detectTabState() {
     // The main frame comes first: prefer its site match. Listing markup can
     // live in a shell iframe, so take the first frame that found one.
     const site = results.map((r) => r.result?.site).find(Boolean) || null;
-    const listing =
-      results.map((r) => r.result?.listing).find(Boolean) || null;
-    return { site, listing };
+    const found =
+      results.map((r) => r.result).find((r) => r && r.listing) || null;
+    return {
+      site,
+      listing: found ? found.listing : null,
+      selectedCount: found ? found.selectedCount || 0 : 0,
+    };
   } catch {
     return { site: null, listing: null };
   }
@@ -973,8 +1134,9 @@ export async function scrapeSelectedSparkListingInTab() {
 
 // --- Listing detail via the same-origin REST API ----------------------------
 
-export function fetchListingDetailsInPage(ids, site) {
+export function fetchListingDetailsInPage(ids, site, options = {}) {
   const idList = Array.isArray(ids) ? ids : [ids];
+  const includeAttachments = options.includeAttachments !== false;
 
   async function captureImages(html) {
     if (!html) return { html: "", images: [] };
@@ -1116,16 +1278,32 @@ export function fetchListingDetailsInPage(ids, site) {
     }
 
     // The incident's attachment-list files (sys_attachment rows), e.g. what
-    // the details page shows under the attachment section.
+    // the details page shows under the attachment section. Only fetched when
+    // the bulk picker is enabled; the picker's selection narrows the files
+    // (an empty per-ticket selection means upload none, a missing entry is
+    // treated as "everything" as a defensive default).
     async function fetchSparkAttachments(incidentSysId) {
+      if (!includeAttachments) return [];
       try {
         const response = await fetchWithRetry(
-          `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(incidentSysId)}&sysparm_fields=sys_id,file_name,content_type&sysparm_display_value=false`,
+          `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(incidentSysId)}&sysparm_fields=sys_id,file_name,content_type&sysparm_display_value=false&sysparm_limit=1000`,
           { credentials: "include", headers: apiHeaders },
         );
         if (!response.ok) return [];
         const json = await response.json();
-        return Array.isArray(json?.result) ? json.result : [];
+        // The selection map is null when the picker was never loaded (include
+        // everything as a defensive default); when present, a ticket's entry —
+        // even an empty array — is authoritative: upload exactly its checked
+        // names, so a ticket with every file over the upload cap uploads none.
+        const selectionMap = options.selectedAttachments;
+        const selected = selectionMap
+          ? new Set(selectionMap[String(incidentSysId)] || [])
+          : null;
+        return (Array.isArray(json?.result) ? json.result : []).filter(
+          (att) =>
+            !selected ||
+            selected.has(String(att?.file_name || "").trim()),
+        );
       } catch {
         return [];
       }
@@ -1205,6 +1383,73 @@ export function fetchListingDetailsInPage(ids, site) {
       }
       const data = await response.json();
       const { html, images } = await captureImages(data.description);
+
+      // The work item's attachment-list files, listed through the API and
+      // downloaded as data URLs (only when the bulk picker is enabled; the
+      // selection narrows which files). Their placeholders are appended to
+      // the html as <p> so they upload as embedded Jira attachments, matching
+      // the single-ticket Octane path.
+      if (includeAttachments) {
+        const query = `owner_work_item EQ {id EQ ${id}}`;
+        const fields = "id,name,description,client_lock_stamp,size,exists";
+        // Same authoritative-selection semantics as the Spark path: a null
+        // map (picker never loaded) includes everything; a ticket's entry —
+        // even empty — includes exactly its checked names.
+        const selectionMap = options.selectedAttachments;
+        const selected = selectionMap
+          ? new Set(selectionMap[String(id)] || [])
+          : null;
+        let attachments = [];
+        try {
+          const listResponse = await fetchWithRetry(
+            `${apiBase}/attachments?fields=${encodeURIComponent(fields)}&query=${encodeURIComponent(`"${query}"`)}`,
+            { credentials: "include" },
+          );
+          if (listResponse.ok) {
+            const body = await listResponse.json();
+            attachments = Array.isArray(body?.data) ? body.data : [];
+          }
+        } catch {
+          attachments = [];
+        }
+        const kept = attachments.filter(
+          (att) =>
+            att &&
+            att.id != null &&
+            att.exists !== false &&
+            String(att.name || "").trim() &&
+            (!selected || selected.has(String(att.name))),
+        );
+        let attImageIndex = images.length;
+        let attIndex = 0;
+        const worker = async () => {
+          while (attIndex < kept.length) {
+            const att = kept[attIndex++];
+            const placeholder = `__JIRA_IMG_${attImageIndex++}__`;
+            try {
+              const blobResponse = await fetchWithRetry(
+                `${apiBase}/attachments/${encodeURIComponent(att.id)}`,
+                { credentials: "include" },
+              );
+              const blob = await blobResponse.blob();
+              const dataUrl = await new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+              });
+              images.push({ placeholder, dataUrl, name: String(att.name) });
+              html += `<p>${placeholder}</p>`;
+            } catch {
+              // Couldn't fetch this file — drop it rather than aborting.
+            }
+          }
+        };
+        await Promise.all(
+          Array.from({ length: Math.min(4, kept.length) }, worker),
+        );
+      }
+
       return {
         id: String(data.id ?? id),
         name: data.name || "",
@@ -1256,7 +1501,7 @@ export function fetchListingDetailsInPage(ids, site) {
 // Fetches the selected items' details from the listing tab. Returns one entry
 // per id, each with an `error` string when that item couldn't load. Throws when
 // the page can't provide an API context at all (e.g. no ?p= for Octane).
-export async function fetchListingDetailsInTab(ids, site) {
+export async function fetchListingDetailsInTab(ids, site, options = {}) {
   const currentTab = await getCurrentTab();
 
   // Scan every frame and keep the one that answered for real: the shell frame
@@ -1266,7 +1511,7 @@ export async function fetchListingDetailsInTab(ids, site) {
   const results = await chrome.scripting.executeScript({
     target: { tabId: currentTab.id, allFrames: true },
     func: fetchListingDetailsInPage,
-    args: [ids, site],
+    args: [ids, site, options],
     // Spark's Table API only authenticates when the request is issued from the
     // page's own context (MAIN world) — the listing session is carried that
     // way. An isolated-world native fetch gets a 401 Basic challenge, and

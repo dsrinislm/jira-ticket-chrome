@@ -13,9 +13,16 @@ import {
   selectAllLabel,
   addBulkRow,
   reorderBulkRowsAfterImport,
+  scrollBulkRowTop,
+  scrollBulkTableTop,
+  scrollBulkToFirstSelected,
   unlockBulkImport,
   lockBulkImport,
+  setBulkRowsFromListing,
+  updateSelectionCount,
   frameBulkView,
+  getBulkIncludeAttachments,
+  getBulkSelectedAttachments,
 } from "./ui.js";
 import { getJiraContext } from "./validation.js";
 import { saveSettings, saveProjectHistory } from "./storage.js";
@@ -28,6 +35,7 @@ import { findExistingJiraIssue, createJiraIssue } from "./api.js";
 import { buildIssueDescription, sourceUrlBlock } from "./adf.js";
 import {
   attachImagesToIssue,
+  uploadMissingAttachments,
   failedAttachmentNames,
 } from "./attachments.js";
 import { ensureJiraReady } from "./session.js";
@@ -93,6 +101,9 @@ function finishBulkRun({ total, projectKey, counters, completed, doneMessage }) 
   updateProgress(total, total, "Import complete");
 
   reorderBulkRowsAfterImport();
+  // The sync tracked each created ticket by pinning it to the top of the
+  // preview table; with everything finished, glide back to the first row.
+  scrollBulkTableTop();
 
   const selectableRemain = state.bulkRows.some(
     (r) =>
@@ -124,6 +135,10 @@ function finishBulkRun({ total, projectKey, counters, completed, doneMessage }) 
     doneMessage(selectableRemain, counters),
     counters.failed ? "error" : "success",
   );
+  // Let the resting-state logic take over: with rows still importable but
+  // nothing new ticked, the CTA hides and the prompt becomes "Select new
+  // items to continue create more".
+  updateSelectionCount();
 }
 
 // Bulk flow #1 — an Excel report file. Each row is a ticket; a bounded pool
@@ -131,6 +146,10 @@ function finishBulkRun({ total, projectKey, counters, completed, doneMessage }) 
 export async function runBulkImport() {
   const ctx = getJiraContext();
   if (!ctx) return;
+
+  // Report-driven flow — the "Create selected tickets" CTA applies here, so
+  // drop any listing-flow state left over from a previous run.
+  setBulkRowsFromListing(false);
 
   const selectedRows = state.bulkRows.filter(
     (r) => r.checkbox.checked && !r.checkbox.disabled,
@@ -146,6 +165,9 @@ export async function runBulkImport() {
   hideLoginButtons();
   exportBtn.style.display = "none";
   setBulkBusy(true);
+  // Open the preview at the top of the selected batch (not the table's first
+  // row) so the sync can follow each created ticket from there.
+  scrollBulkToFirstSelected();
 
   abortRequested = false;
   abortImportBtn.disabled = false;
@@ -201,6 +223,9 @@ export async function runBulkImport() {
               "created",
               `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>`,
             );
+            // Keep the freshest created ticket pinned to the top of the
+            // preview table while the sync runs (workers finish out of order).
+            scrollBulkRowTop(row);
             counters.created++;
           }
         } catch (err) {
@@ -238,6 +263,11 @@ export async function runListingImport(site) {
   const flowSite = site === "Spark" ? "Spark" : "Octane";
   const ctx = getJiraContext();
   if (!ctx) return;
+
+  // Listing-driven flow: rows are scraped from the page, so re-running is
+  // always through the "Sync selected … listing" CTA — never the report flow's
+  // "Create selected tickets" button.
+  setBulkRowsFromListing(true);
 
   const { jiraOrigin, projectKey } = ctx;
   saveSettings();
@@ -290,6 +320,9 @@ export async function runListingImport(site) {
 
     // Reveal the preview right away so the user sees the rows fill in live.
     frameBulkView();
+    // Open the preview at the top of the selected batch (all listing rows are
+    // selected, so this lands on the first item) before the sync follows.
+    scrollBulkToFirstSelected();
 
     progressSection.style.display = "block";
     updateProgress(0, items.length, "Starting import…");
@@ -299,10 +332,20 @@ export async function runListingImport(site) {
     // Table API needs the page CSRF token (X-UserToken from the MAIN world)
     // alongside the cookie — see fetchListingDetailsInTab. No tabs, no Basic
     // prompt: the request carries the same session+CSRF the page itself uses.
+    // The "Include attachments" picker (default OFF) narrows which files each
+    // ticket's detail downloads; when off, attachment files are skipped
+    // entirely so the details pass only fetches the description.
     let details = [];
     if (flowSite === "Octane" || flowSite === "Spark") {
       try {
-        details = await fetchListingDetailsInTab(items.map((i) => i.id), flowSite);
+        details = await fetchListingDetailsInTab(
+          items.map((i) => i.id),
+          flowSite,
+          {
+            includeAttachments: getBulkIncludeAttachments(),
+            selectedAttachments: getBulkSelectedAttachments() || undefined,
+          },
+        );
       } catch (err) {
         const message = err.message || `${flowSite} API fetch failed`;
         details = items.map((item) => ({
@@ -379,11 +422,39 @@ export async function runListingImport(site) {
           counters.failed++;
         } else if (existing.issue) {
           const url = `${jiraOrigin}/browse/${existing.issue.key}`;
-          setRowStatus(
-            row,
-            "exists",
-            `Already exists — <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(existing.issue.key)}</a>`,
-          );
+          const key = escapeHtml(existing.issue.key);
+          const existsLink = `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${key}</a>`;
+          let statusHtml = `Already exists — ${existsLink}`;
+
+          // Re-running the import with "Include attachments" on is the bulk
+          // resync: a ticket that already exists uploads only the files its
+          // issue is actually missing (the bytes were captured in the batched
+          // details fetch), mirroring the single-ticket sync. Skipped count
+          // stays "already existed" — the row was still a duplicate.
+          if (getBulkIncludeAttachments() && detail?.images?.length) {
+            try {
+              const syncReport = await uploadMissingAttachments(
+                jiraOrigin,
+                existing.issue.key,
+                detail.images,
+              );
+              if (syncReport.failed > 0) {
+                statusHtml = `Already exists — ${existsLink} — ${syncReport.failed} attachment(s) failed to sync${failedAttachmentNames(syncReport.failedNames)}`;
+              } else if (syncReport.skipped < detail.images.length) {
+                statusHtml = `Already exists — ${existsLink} — synced missing attachments`;
+              } else {
+                statusHtml = `Already exists — ${existsLink} — attachments up to date`;
+              }
+            } catch (err) {
+              console.error("Bulk resync failed for", items[index].id, err);
+              statusHtml = `Already exists — ${existsLink} — couldn't sync attachments`;
+            }
+          }
+
+          setRowStatus(row, "exists", statusHtml);
+          // A resynced ticket is finished work too — keep it pinned at the
+          // top of the preview table alongside freshly created ones.
+          scrollBulkRowTop(row);
           counters.skipped++;
         } else {
           setRowStatus(row, "creating", "Creating…");
@@ -409,6 +480,7 @@ export async function runListingImport(site) {
 
             let attachFailed = 0;
             let attachNames = [];
+            let attachDescriptionError = "";
             if (detail.images?.length) {
               const attachReport = await attachImagesToIssue(
                 jiraOrigin,
@@ -418,20 +490,26 @@ export async function runListingImport(site) {
               );
               attachFailed = attachReport.failed;
               attachNames = attachReport.failedNames || [];
+              attachDescriptionError = attachReport.descriptionError || "";
             }
 
             const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
             setRowStatus(
               row,
               "created",
-              `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>${attachFailed ? ` — ${attachFailed} attachment(s) failed to upload${failedAttachmentNames(attachNames)}` : ""}`,
+              `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>${attachFailed ? ` — ${attachFailed} attachment(s) failed to upload${failedAttachmentNames(attachNames)}` : ""}${attachDescriptionError ? " — attachments uploaded, but inline image embed failed" : ""}`,
             );
+            // Keep the freshest created ticket pinned to the top of the
+            // preview table while the sync runs (workers finish out of order).
+            scrollBulkRowTop(row);
             counters.created++;
             setStatus(
               attachFailed
                 ? `Created ${issue.key} (${attachFailed} attachment(s) failed to upload${failedAttachmentNames(attachNames)}).`
-                : `Created ${issue.key}.`,
-              attachFailed ? "error" : "success",
+                : attachDescriptionError
+                  ? `Created ${issue.key} (attachments uploaded, but inline image embed failed).`
+                  : `Created ${issue.key}.`,
+              attachFailed || attachDescriptionError ? "error" : "success",
             );
           } catch (err) {
             console.error(`${flowSite} import failed for`, items[index].id, err);

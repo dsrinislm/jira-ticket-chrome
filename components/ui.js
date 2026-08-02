@@ -23,6 +23,41 @@ export const attachmentPicker = el("attachmentPicker");
 export const attachmentGroups = el("attachmentGroups");
 export const attachmentSelectAll = el("attachmentSelectAll");
 export const attachmentNote = el("attachmentNote");
+export const bulkAttachmentSection = el("bulkAttachmentSection");
+export const bulkIncludeAttachments = el("bulkIncludeAttachments");
+export const bulkAttachmentPicker = el("bulkAttachmentPicker");
+export const bulkAttachmentGroups = el("bulkAttachmentGroups");
+export const bulkAttachmentSelectAll = el("bulkAttachmentSelectAll");
+export const bulkAttachmentNote = el("bulkAttachmentNote");
+
+// Both pickers' "Choose attachments" headers are collapsible: clicking the
+// title hides the file list (and note) so the section stays slim during
+// creation, without changing the stored selection. Collapsing is purely
+// visual, so it's wired here at module scope alongside the refs.
+for (const picker of [attachmentPicker, bulkAttachmentPicker]) {
+  const collapseBtn = picker?.querySelector(".attachment-picker-collapse");
+  collapseBtn?.addEventListener("click", () => {
+    const collapsed = picker.classList.toggle("collapsed");
+    collapseBtn.setAttribute("aria-expanded", String(!collapsed));
+  });
+}
+
+// Re-expands a picker (fresh render after a re-enable should show the list,
+// even if an earlier run auto-collapsed it). Skipped while the flow is busy
+// so a slow async list arriving mid-creation can't pop the picker open again
+// over the upload progress.
+function expandAttachmentPicker(picker) {
+  if (!picker) return;
+  const busy =
+    picker === bulkAttachmentPicker
+      ? Boolean(importBtn?.disabled)
+      : Boolean(createTicketBtn?.disabled);
+  if (busy) return;
+  picker.classList.remove("collapsed");
+  picker
+    .querySelector(".attachment-picker-collapse")
+    ?.setAttribute("aria-expanded", "true");
+}
 
 export function getIncludeAttachments() {
   return includeAttachmentsInput.checked;
@@ -42,6 +77,7 @@ export function getSelectedAttachments() {
 
 export function setAttachmentPickerLoading() {
   attachmentPicker.hidden = false;
+  expandAttachmentPicker(attachmentPicker);
   attachmentGroups.innerHTML = "";
   setAttachmentNote("");
   state.attachmentSelection = null;
@@ -121,6 +157,7 @@ function formatBytes(bytes) {
 
 export function renderAttachmentPicker(items) {
   attachmentPicker.hidden = false;
+  expandAttachmentPicker(attachmentPicker);
   attachmentGroups.innerHTML = "";
   state.attachmentSelection = items.map((i) => i.name);
 
@@ -180,6 +217,172 @@ export function renderAttachmentPicker(items) {
   }
 }
 
+// --- Bulk-import attachment picker ------------------------------------------
+// One group per selected ticket; the user checks which files to upload across
+// all of them. Selection is kept in state.bulkAttachmentSelection[ticketId] =
+// [names], so runListingImport can pass exactly the checked files.
+
+export function getBulkIncludeAttachments() {
+  return Boolean(bulkIncludeAttachments?.checked);
+}
+
+// The bulk picker's selection map ({ [ticketId]: [names] }), or null when the
+// picker was never loaded (toggle off / listing failed) — callers treat null
+// as "include everything", matching the single-ticket semantics.
+export function getBulkSelectedAttachments() {
+  return state.bulkAttachmentSelection;
+}
+
+// The bulk attachment section only makes sense while a listing is detected
+// (the Excel flow has no attachment source), so detection shows/hides it.
+export function setBulkAttachmentSectionVisible(visible) {
+  if (!bulkAttachmentSection) return;
+  bulkAttachmentSection.style.display = visible ? "block" : "none";
+  if (!visible) {
+    if (bulkIncludeAttachments) bulkIncludeAttachments.checked = false;
+    clearBulkAttachmentPicker();
+    setBulkPreviewCollapsed(false);
+  }
+}
+
+// Collapses the preview table while the bulk attachment picker is open (the
+// toggle is checked) so the file picker stays front and center. The table
+// re-expands the moment rows are added again — an import must show progress.
+// The toolbar (and its manual collapse button) stays visible either way, and
+// the button's aria-expanded mirrors the state.
+export function setBulkPreviewCollapsed(collapsed) {
+  if (!previewSection) return;
+  previewSection.classList.toggle("preview-collapsed", Boolean(collapsed));
+  previewCollapseBtn?.setAttribute("aria-expanded", String(!collapsed));
+}
+
+// Glides the preview table so `row.tr` sits at the top of its scroll area,
+// just below the sticky column header. Used during a sync so the most
+// recently created/synced ticket stays in view — the workers finish out of
+// order, so this re-pins (smoothly) each freshly finished row.
+export function scrollBulkRowTop(row, smooth = true) {
+  if (!tableWrap || !row?.tr) return;
+  const thead = tableWrap.querySelector("thead");
+  const headerHeight = thead ? thead.offsetHeight : 0;
+  tableWrap.scrollTo({
+    top: Math.max(0, row.tr.offsetTop - headerHeight),
+    behavior: smooth ? "smooth" : "auto",
+  });
+}
+
+// Pins the preview table to the top item of the currently selected batch
+// (the first ticked, importable row) — not the table's literal first row, so
+// a selection that starts further down still opens at its own first item.
+// Falls back to the table top when nothing is ticked.
+export function scrollBulkToFirstSelected() {
+  if (!tableWrap) return;
+  const first = state.bulkRows.find(
+    (r) => !r.checkbox.disabled && r.checkbox.checked,
+  );
+  if (first) scrollBulkRowTop(first, false);
+  else scrollBulkTableTop();
+}
+
+// Scrolls the preview table back to its first row. Used at the start of a
+// run (so the sync follows from the top) and when a sync finishes.
+export function scrollBulkTableTop(smooth = false) {
+  if (!tableWrap) return;
+  tableWrap.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
+}
+
+export function setBulkAttachmentNote(message) {
+  if (!bulkAttachmentNote) return;
+  bulkAttachmentNote.hidden = !message;
+  bulkAttachmentNote.textContent = message || "";
+}
+
+export function setBulkAttachmentPickerLoading() {
+  if (!bulkAttachmentPicker) return;
+  bulkAttachmentPicker.hidden = false;
+  expandAttachmentPicker(bulkAttachmentPicker);
+  bulkAttachmentGroups.innerHTML = "";
+  setBulkAttachmentNote("");
+  state.bulkAttachmentSelection = null;
+}
+
+export function clearBulkAttachmentPicker() {
+  if (bulkAttachmentPicker) bulkAttachmentPicker.hidden = true;
+  if (bulkAttachmentGroups) bulkAttachmentGroups.innerHTML = "";
+  setBulkAttachmentNote("");
+  if (bulkAttachmentSelectAll) bulkAttachmentSelectAll.checked = true;
+  state.bulkAttachmentSelection = null;
+}
+
+// groups: [{ id, attachments: [{ name, size, sizeBytes, type }] }]; labels:
+// { [id]: display text for the group title } (e.g. the INC number for Spark).
+export function renderBulkAttachmentPicker(groups, labels = {}) {
+  if (!bulkAttachmentPicker) return;
+  bulkAttachmentPicker.hidden = false;
+  expandAttachmentPicker(bulkAttachmentPicker);
+  bulkAttachmentGroups.innerHTML = "";
+  state.bulkAttachmentSelection = {};
+
+  let anyFiles = false;
+  for (const group of groups) {
+    const files = group.attachments || [];
+    if (!files.length) continue;
+    anyFiles = true;
+
+    const selection = files.map((f) => f.name);
+    state.bulkAttachmentSelection[String(group.id)] = selection;
+
+    const block = document.createElement("div");
+    block.className = "attachment-group";
+
+    const totalBytes = files.reduce(
+      (sum, f) => sum + (Number(f.sizeBytes) || 0),
+      0,
+    );
+    const totalSize = formatBytes(totalBytes);
+
+    const title = document.createElement("div");
+    title.className = "attachment-group-title";
+    title.textContent = `${labels[String(group.id)] || group.id} (${files.length})${totalSize ? ` · ${totalSize}` : ""}`;
+    block.appendChild(title);
+
+    for (const item of files) {
+      const row = document.createElement("label");
+      row.className = "attachment-item";
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = true;
+      checkbox.dataset.name = item.name;
+      checkbox.dataset.ticket = String(group.id);
+      checkbox.addEventListener("change", () => {
+        const sel = state.bulkAttachmentSelection?.[String(group.id)] || [];
+        state.bulkAttachmentSelection[String(group.id)] = checkbox.checked
+          ? [...sel, item.name]
+          : sel.filter((n) => n !== item.name);
+      });
+
+      const name = document.createElement("span");
+      name.className = "attachment-item-name";
+      name.textContent = item.name;
+      name.title = item.size ? `${item.name}\nSize: ${item.size}` : item.name;
+
+      const size = document.createElement("span");
+      size.className = "attachment-item-size";
+      size.textContent = item.size || "";
+
+      row.append(checkbox, name, size);
+      block.appendChild(row);
+    }
+
+    bulkAttachmentGroups.appendChild(block);
+  }
+
+  if (!anyFiles) {
+    bulkAttachmentGroups.innerHTML =
+      '<div class="attachment-group-title">No attachments found.</div>';
+  }
+}
+
 export function getSourceSite() {
   return sourceSiteInput.checked ? "Spark" : "Octane";
 }
@@ -224,7 +427,19 @@ export const fileSummary = el("fileSummary");
 export const previewSection = el("previewSection");
 export const previewBody = el("previewBody");
 export const previewIdHeader = el("previewIdHeader");
+export const previewCollapseBtn = el("previewCollapseBtn");
+export const tableWrap = document.querySelector(".table-wrap");
 export const selectAllCheckbox = el("selectAllCheckbox");
+
+// Manual collapse/expand toggle on the preview toolbar — works independently
+// of the include-attachments auto-collapse so the table can be tucked away
+// (or brought back) at any time. Wired here, after the refs, so the button
+// exists before the listener attaches.
+previewCollapseBtn?.addEventListener("click", () => {
+  setBulkPreviewCollapsed(
+    !previewSection.classList.contains("preview-collapsed"),
+  );
+});
 export const selectAllLabel = document.querySelector(".select-all");
 export const selectionCount = el("selectionCount");
 export const importBtn = el("importBtn");
@@ -234,6 +449,7 @@ export const dropzone = document.querySelector(".file-dropzone");
 export const dropzoneTitle = el("dropzoneTitle");
 export const dropzoneHint = el("dropzoneHint");
 export const dropzoneIcon = el("dropzoneIcon");
+export const clearFileBtn = el("clearFileBtn");
 export const progressSection = el("progressSection");
 export const progressLabel = el("progressLabel");
 export const progressPercent = el("progressPercent");
@@ -252,6 +468,10 @@ export const state = {
   importData: null,
   importExt: null,
   attachmentSelection: null,
+  // Bulk picker selection: { [ticketId]: [selected file names] }. Empty when
+  // the picker is closed; per-ticket arrays are empty when the user unchecked
+  // everything for that ticket.
+  bulkAttachmentSelection: null,
 };
 
 const HTML_ESCAPES = {
@@ -288,6 +508,20 @@ export function setBusy(isBusy) {
   jiraBaseUrlInput.disabled = isBusy;
   projectKeyInput.disabled = isBusy;
   includeAttachmentsInput.disabled = isBusy;
+  if (isBusy) collapseAttachmentPickers();
+}
+
+// Collapses any visible attachment picker so creation/progress is front and
+// center; the user can re-expand via the header. The stored selection is
+// unaffected — collapsing only hides the file list.
+export function collapseAttachmentPickers() {
+  for (const picker of [attachmentPicker, bulkAttachmentPicker]) {
+    if (!picker || picker.hidden) continue;
+    picker.classList.add("collapsed");
+    picker
+      .querySelector(".attachment-picker-collapse")
+      ?.setAttribute("aria-expanded", "false");
+  }
 }
 
 // When every row in the uploaded file has been created or already existed,
@@ -299,16 +533,49 @@ export function lockBulkImport() {
 }
 
 export function unlockBulkImport() {
+  // In the listing flow the "Create selected tickets" CTA stays hidden —
+  // re-running goes through the "Sync selected … listing" CTA instead.
+  if (bulkRowsFromListing) return;
   importBtn.classList.remove("hidden");
   importBtn.disabled = false;
   importBtn.dataset.loading = "false";
 }
 
+// Tracks whether a bulk run is in flight. addBulkRow/loadBulkRows consult it
+// so rows added mid-sync don't re-show the Select-all toggle the busy state
+// just hid.
+let bulkBusy = false;
+
+// True while the current bulk preview rows came from a site listing
+// (runListingImport) rather than an Excel report. In that flow the "Create
+// selected tickets" CTA is never shown — re-running is always done through
+// the "Sync selected … listing" CTA, which re-reads the ticked rows from the
+// page. Cleared when a report is loaded or the upload is cleared.
+let bulkRowsFromListing = false;
+
+export function setBulkRowsFromListing(fromListing) {
+  bulkRowsFromListing = Boolean(fromListing);
+}
+
+export function isBulkRowsFromListing() {
+  return bulkRowsFromListing;
+}
+
 export function setBulkBusy(isBusy) {
+  bulkBusy = Boolean(isBusy);
   importBtn.disabled = isBusy;
   importBtn.dataset.loading = isBusy ? "true" : "false";
   fileInput.disabled = isBusy;
   listingImportBtn.disabled = isBusy;
+  if (isBusy) collapseAttachmentPickers();
+  // While a bulk run is in progress the preview header keeps only the
+  // "Processed N, Selected X of Y" count (right-aligned) — the "Preview
+  // selected tickets" caption and the Select-all toggle would only crowd the
+  // "Processing N of M" status label. Both come back once the run settles,
+  // with Select-all only if anything is still selectable.
+  previewCollapseBtn?.classList.toggle("hidden", isBusy);
+  selectAllLabel?.classList.toggle("hidden", isBusy);
+  if (!isBusy) updateBulkSelectAllVisibility();
 }
 
 // Remembers each view's scroll offset so switching tabs restores the user's
@@ -379,18 +646,22 @@ export function updateBulkStatusMessage() {
     jiraBaseUrlInput.value.trim() && projectKeyInput.value.trim();
   setStatus(
     jiraConfigured
-      ? activeListingSite
-        ? "Upload report or Import selected listing"
-        : "Upload Octane or Spark report"
+      ? excelFlowActive || !activeListingSite || !listingHasSelection
+        ? "Upload Octane or Spark report"
+        : "Upload report or Sync selected listing"
       : "Configure Jira details and create a ticket.",
     "info",
   );
 }
 
 // The site detected on the active tab's listing page (null when the tab isn't
-// a supported listing). Lets the bulk status message say "Import selected
-// listing" only where that action actually exists.
+// a supported listing) and whether that listing has at least one ticked row.
+// Together they gate the listing-only controls: the "Sync selected … listing"
+// CTA and the bulk "Include attachments" section appear only when a site
+// import can actually run (listing detected AND something selected) — with
+// nothing ticked the Excel flow is the only import path.
 let activeListingSite = null;
+let listingHasSelection = false;
 
 export function setActiveListingSite(site) {
   activeListingSite = site || null;
@@ -398,6 +669,52 @@ export function setActiveListingSite(site) {
 
 export function getActiveListingSite() {
   return activeListingSite;
+}
+
+export function setListingHasSelection(hasSelection) {
+  listingHasSelection = Boolean(hasSelection);
+  updateListingControls();
+}
+
+export function getListingHasSelection() {
+  return listingHasSelection;
+}
+
+// True while an Excel report is loaded in the bulk view. The Excel flow has
+// no attachment source and no listing page, so while it's active the
+// listing-only controls — the "Sync selected … listing" CTA and the bulk
+// "Include attachments" section — stay hidden. Clearing the upload restores
+// them to whatever the active tab's listing state says.
+let excelFlowActive = false;
+
+export function isExcelFlowActive() {
+  return excelFlowActive;
+}
+
+export function setExcelFlowActive(active) {
+  excelFlowActive = Boolean(active);
+  updateListingControls();
+}
+
+// The listing-only controls show only when the active tab is a supported
+// listing with at least one ticked row AND no report is loaded.
+function updateListingControls() {
+  const show =
+    !excelFlowActive && Boolean(activeListingSite) && listingHasSelection;
+  setBulkAttachmentSectionVisible(show);
+  listingImportBtn.style.display = show ? "block" : "none";
+  if (show) {
+    listingImportLabel.textContent = `Sync selected ${activeListingSite} listing`;
+  }
+}
+
+// Single entry point that folds the active tab's listing state (site +
+// selection) into every listing-dependent control: the dropzone's clear
+// affordance and the bulk "Include attachments" section + sync CTA.
+export function applyListingState(listing, selectedCount) {
+  setActiveListingSite(listing);
+  setListingHasSelection(selectedCount > 0);
+  updateClearAffordance(listing, selectedCount);
 }
 
 const DROPZONE_ICON_EXCEL =
@@ -409,6 +726,11 @@ export function setDropzoneLoaded() {
   dropzone.dataset.loaded = "true";
   dropzoneTitle.textContent = "Upload Done";
   dropzoneIcon.innerHTML = DROPZONE_ICON_CHECK;
+  clearFileBtn.hidden = false;
+  // An uploaded report means the Excel flow is the source of truth — the
+  // listing CTA and include-attachments picker don't apply while it's loaded.
+  setExcelFlowActive(true);
+  setBulkRowsFromListing(false);
 }
 
 export function resetDropzone() {
@@ -417,6 +739,55 @@ export function resetDropzone() {
   dropzoneIcon.innerHTML = DROPZONE_ICON_EXCEL;
   dropzoneHint.innerHTML =
     "Octane: ID/Name/Description<br/>Spark: Number/Short description/Description";
+  clearFileBtn.hidden = true;
+  // With the upload cleared, the listing-based controls come back (if the
+  // active tab is a supported listing).
+  setExcelFlowActive(false);
+}
+
+// Clears a loaded report and restores the bulk view to its idle state:
+// dropzone reset, preview/progress/export cleared, and the listing controls
+// (sync CTA + include attachments) re-enabled.
+export function clearFileUpload() {
+  if (fileInput) fileInput.value = "";
+  state.bulkRows = [];
+  state.importData = null;
+  state.importExt = null;
+  if (previewBody) previewBody.innerHTML = "";
+  if (previewSection) previewSection.style.display = "none";
+  if (progressSection) progressSection.style.display = "none";
+  if (exportBtn) exportBtn.style.display = "none";
+  if (fileError) fileError.style.display = "none";
+  if (fileSummary) fileSummary.textContent = "";
+  selectAllLabel?.classList.add("hidden");
+  unlockBulkImport();
+  resetDropzone();
+  setBulkRowsFromListing(false);
+  updateSelectionCount();
+}
+
+// The clear chip on the dropzone. Wired here (after the refs) so the button
+// exists before the listener attaches; a click on it clears the upload
+// instead of opening the file picker.
+clearFileBtn?.addEventListener("click", clearFileUpload);
+
+// The dropzone's clear affordance (the clear button and its "Click clear to
+// switch to … importing" hint) is only useful while a site import could
+// actually run. On a listing page with nothing ticked the loaded report is the
+// only viable source, so both stay hidden there and reappear as soon as rows
+// are selected or the tab leaves the listing.
+export function updateClearAffordance(listing, selectedCount) {
+  if (!isExcelFlowActive()) return;
+  setClearHintVisible(!listing || selectedCount > 0);
+}
+
+function setClearHintVisible(visible) {
+  clearFileBtn.hidden = !visible;
+  const hint = dropzoneHint.querySelector(".dropzone-clear-hint");
+  if (!hint) return;
+  hint.style.display = visible ? "" : "none";
+  const br = hint.previousSibling;
+  if (br && br.nodeName === "BR") br.style.display = visible ? "" : "none";
 }
 
 // The count label and status prompt are recomputed on every row-state change,
@@ -460,11 +831,37 @@ export function updateSelectionCount() {
     if (!state.bulkRows.length || importBtn.disabled) return;
 
     if (selectable === 0) {
-      setStatus("Bulk import done! try different report", "success");
+      lockBulkImport();
+      setStatus(
+        bulkRowsFromListing
+          ? "Bulk import done! Select rows on the listing page to sync more"
+          : "Bulk import done! try different report",
+        "success",
+      );
     } else if (selected > 0) {
-      setStatus("All set - Export selected tickets into JIRA", "info");
+      // Something is ticked again — the create CTA comes back and is ready
+      // (Excel flow); in the listing flow the "Sync selected … listing" CTA
+      // is the re-run path.
+      unlockBulkImport();
+      setStatus(
+        bulkRowsFromListing
+          ? "All set - Sync selected listing to continue"
+          : "All set - Export selected tickets into JIRA",
+        "info",
+      );
     } else {
-      setStatus("Select the tickets to import.", "info");
+      // Rows remain but none are ticked. After a run the imported rows are
+      // done and the rest needs a fresh pick — keep the CTA hidden until the
+      // user selects new items (the Excel flow can batch-create in rounds).
+      importBtn.classList.add("hidden");
+      setStatus(
+        processed > 0
+          ? bulkRowsFromListing
+            ? "Select new items on the listing page to sync more"
+            : "Select new items to continue create more"
+          : "Select the tickets to import.",
+        "info",
+      );
     }
   });
 }
@@ -476,20 +873,29 @@ export function toggleSelectAll() {
   updateSelectionCount();
 }
 
+const isBulkRowDone = (r) =>
+  r.statusEl.dataset.state === "created" || r.statusEl.dataset.state === "exists";
+
+// Shows the Select-all toggle only when at least one row can still be chosen
+// (anything not created/exists). Called after a run settles so an all-done
+// table hides the toggle, mirroring reorderBulkRowsAfterImport.
+export function updateBulkSelectAllVisibility() {
+  if (!selectAllLabel) return;
+  const hasSelectable = state.bulkRows.some((r) => !isBulkRowDone(r));
+  selectAllLabel.classList.toggle("hidden", !hasSelectable);
+}
+
 // After an import, hoist rows that were created or already existed to the
 // top of the preview and lock their checkboxes so they can't be re-imported.
 export function reorderBulkRowsAfterImport() {
-  const isDone = (r) =>
-    r.statusEl.dataset.state === "created" || r.statusEl.dataset.state === "exists";
-
   const done = [];
   const rest = [];
-  state.bulkRows.forEach((r) => (isDone(r) ? done : rest).push(r));
+  state.bulkRows.forEach((r) => (isBulkRowDone(r) ? done : rest).push(r));
   state.bulkRows = [...done, ...rest];
 
   const fragment = document.createDocumentFragment();
   state.bulkRows.forEach((r) => {
-    if (isDone(r)) {
+    if (isBulkRowDone(r)) {
       r.checkbox.disabled = true;
       r.checkbox.checked = true;
       r.tr.classList.add("row-done");
@@ -498,9 +904,10 @@ export function reorderBulkRowsAfterImport() {
   });
   previewBody.appendChild(fragment);
 
-  // With every row finished, the select-all toggle has nothing left to do.
-  const allDone = state.bulkRows.every(isDone);
-  selectAllLabel?.classList.toggle("hidden", allDone);
+  // With every row finished, the select-all toggle has nothing left to do
+  // (and while the run is still busy it stays hidden regardless).
+  const allDone = state.bulkRows.every(isBulkRowDone);
+  selectAllLabel?.classList.toggle("hidden", bulkBusy || allDone);
 
   updateSelectionCount();
 }
@@ -632,6 +1039,14 @@ function scheduleClampUpdate() {
   });
 }
 
+// Shift-click support for the preview table's row checkboxes. The last
+// checkbox the user clicked becomes the anchor; a shift+click on another row
+// then flips every checkbox between the two to the clicked row's state.
+let shiftSelectAnchor = null;
+// The change event doesn't carry modifier keys, so the click handler (a real
+// MouseEvent) records whether shift was held for the toggle that follows.
+let lastShiftClick = false;
+
 // Builds a single preview row without touching the DOM tree, returning
 // { tr, row }. addBulkRow appends it immediately (streaming listing flow);
 // loadBulkRows collects the tr's into a fragment for one bulk append.
@@ -649,7 +1064,6 @@ function buildBulkRow(record, site = "Octane") {
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   checkbox.checked = true;
-  checkbox.addEventListener("change", updateSelectionCount);
   checkTd.appendChild(checkbox);
 
   const idTd = document.createElement("td");
@@ -702,6 +1116,31 @@ function buildBulkRow(record, site = "Octane") {
   };
   state.bulkRows.push(row);
 
+  // The click handler only records the modifier keys (change events don't
+  // carry them); the change handler applies the range and refreshes counts.
+  row.checkbox.addEventListener("click", (e) => {
+    lastShiftClick = e.shiftKey;
+  });
+  row.checkbox.addEventListener("change", () => {
+    const rangeSelect = lastShiftClick;
+    lastShiftClick = false;
+    if (rangeSelect && shiftSelectAnchor && shiftSelectAnchor !== row) {
+      const thisIndex = state.bulkRows.indexOf(row);
+      const anchorIndex = state.bulkRows.indexOf(shiftSelectAnchor);
+      if (thisIndex !== -1 && anchorIndex !== -1) {
+        const start = Math.min(thisIndex, anchorIndex);
+        const end = Math.max(thisIndex, anchorIndex);
+        const checked = row.checkbox.checked;
+        for (let i = start; i <= end; i++) {
+          const r = state.bulkRows[i];
+          if (!r.checkbox.disabled) r.checkbox.checked = checked;
+        }
+      }
+    }
+    shiftSelectAnchor = row;
+    updateSelectionCount();
+  });
+
   return { tr, row };
 }
 
@@ -712,7 +1151,8 @@ export function addBulkRow(record, site = "Octane") {
   const { tr, row } = buildBulkRow(record, site);
   previewBody.appendChild(tr);
   previewSection.style.display = "block";
-  selectAllLabel?.classList.remove("hidden");
+  setBulkPreviewCollapsed(false);
+  selectAllLabel?.classList.toggle("hidden", bulkBusy);
   updateSelectionCount();
   scheduleClampUpdate();
 
@@ -722,6 +1162,7 @@ export function addBulkRow(record, site = "Octane") {
 export function loadBulkRows(rows, site = "Octane") {
   previewBody.innerHTML = "";
   state.bulkRows = [];
+  shiftSelectAnchor = null;
 
   // One bulk append (via a fragment) instead of N separate ones — large
   // Excel reports render noticeably faster this way.
@@ -732,7 +1173,8 @@ export function loadBulkRows(rows, site = "Octane") {
   previewBody.appendChild(fragment);
 
   previewSection.style.display = "block";
-  selectAllLabel?.classList.remove("hidden");
+  setBulkPreviewCollapsed(false);
+  selectAllLabel?.classList.toggle("hidden", bulkBusy);
   updateSelectionCount();
   scheduleClampUpdate();
 

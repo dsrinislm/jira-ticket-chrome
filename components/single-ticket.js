@@ -299,6 +299,11 @@ export async function createTicket() {
         `Created ${issue.key}, but ${attachReport.failed} attachment(s) failed to upload${failedAttachmentNames(attachReport.failedNames)} (${attachReport.firstError}).`,
         "error",
       );
+    } else if (attachReport.descriptionError) {
+      setStatus(
+        `Created ${issue.key} (attachments uploaded, but inline image embed failed).`,
+        "info",
+      );
     } else {
       setStatus(`Created ${issue.key}.`, "success");
     }

@@ -492,7 +492,16 @@ button:disabled {
 }
 
 #listingImportBtn {
-  margin-top: 10px;
+  /* Sits below the preview section, not inside it (the section is hidden
+     until rows exist), so it must not stretch with the flex column. The 12px
+     bottom margin keeps it on the same rhythm as the .field-block sections. */
+  flex: 0 0 auto;
+  margin: 0 0 12px;
+}
+
+#listingImportBtn:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 12px 26px -6px rgba(91, 75, 255, 0.55);
 }
 
 #listingImportBtn .btn-icon {
@@ -663,6 +672,25 @@ button:disabled {
   }
 }
 
+/* While the bulk attachment picker is open (include-attachments checked) the
+   preview table collapses so the picker stays front and center — but the
+   toolbar stays up so the manual collapse caption stays visible. The progress
+   bar and import CTAs below remain visible either way. */
+#previewSection.preview-collapsed .table-wrap {
+  display: none;
+}
+
+#previewSection.preview-collapsed .attachment-picker-chevron {
+  transform: rotate(-90deg);
+}
+
+.preview-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
 /* Result Section */
 
 #ticketResult {
@@ -825,6 +853,53 @@ button:disabled {
   pointer-events: none;
 }
 
+/* Clear control on the upload dropzone, shown only once a report is loaded,
+   pinned to its top-right corner. The dropzone is a <label>, but a click
+   landing on the button is handled by the button itself — the label doesn't
+   forward it to the file input. */
+.clear-file-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(229, 72, 77, 0.4);
+  border-radius: 50%;
+  background: var(--danger-50);
+  color: var(--danger);
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.clear-file-btn[hidden] {
+  display: none;
+}
+
+.clear-file-btn:hover {
+  color: #fff;
+  border-color: var(--danger);
+  background: #d93036;
+  transform: scale(1.06);
+}
+
+.clear-file-btn:active {
+  transform: scale(1);
+}
+
+.clear-file-icon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
 .dropzone-main {
   display: flex;
   align-items: center;
@@ -850,6 +925,14 @@ button:disabled {
   font-size: 11px;
   color: var(--text-muted);
   line-height: 1.4;
+}
+
+.dropzone-switch-hint {
+  color: #767a90;
+}
+
+.dropzone-clear-hint {
+  color: #ef8a8e;
 }
 
 .file-dropzone[data-loaded="true"] {
@@ -881,7 +964,7 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  gap: 8px;
 }
 
 .field-block-attachments {
@@ -928,6 +1011,46 @@ button:disabled {
   justify-content: space-between;
   gap: 8px;
   margin-bottom: 3px;
+}
+
+/* Collapse/expand control on the picker header: resets the generic button
+   styles so it reads as a clickable title row, not a CTA. */
+.attachment-picker-collapse {
+  flex: 1;
+  justify-content: flex-start;
+  gap: 6px;
+  height: auto;
+  padding: 2px 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attachment-picker-collapse:active {
+  transform: none;
+}
+
+.attachment-picker-chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+}
+
+.attachment-picker.collapsed .attachment-picker-chevron {
+  transform: rotate(-90deg);
+}
+
+.attachment-picker.collapsed .attachment-note,
+.attachment-picker.collapsed .attachment-groups {
+  display: none;
 }
 
 .attachment-picker-title {
@@ -1017,10 +1140,10 @@ button:disabled {
 .select-all {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: 4px;
+  font-size: 11px;
   font-weight: 600;
-  color: var(--text-secondary);
+  color: var(--text-muted);
   cursor: pointer;
 }
 
