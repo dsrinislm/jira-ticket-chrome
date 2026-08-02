@@ -146,9 +146,6 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      // Jira Server/Data Center rejects cookie-authenticated POSTs
-      // without this unless the caller opts out of XSRF checking.
-      // Jira Cloud ignores the header, so it's safe to send always.
       "X-Atlassian-Token": "no-check",
     },
     body: JSON.stringify(payload),

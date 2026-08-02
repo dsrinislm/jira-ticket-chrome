@@ -70,41 +70,114 @@ export function handleFileSelected() {
 }
 
 export async function downloadPreviewReport() {
-  if (!state.importData) return;
-
   try {
     const ExcelJS = await loadExcelJS();
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(state.importData);
 
-    const rows = state.bulkRows.map((r) => {
-      const statusLink = r.statusEl.querySelector("a");
-      return statusLink
-        ? {
-            rowIndex: r.rowIndex,
-            text: statusLink.textContent.trim(),
-            href: statusLink.getAttribute("href"),
-          }
-        : {
-            rowIndex: r.rowIndex,
-            text: r.statusEl.textContent.trim().replace(/\s+/g, " "),
-          };
-    });
+    let workbook;
+    if (state.importData) {
+      workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(state.importData);
 
-    buildReport(workbook, rows);
+      const rows = state.bulkRows.map((r) => {
+        const statusLink = r.statusEl.querySelector("a");
+        return statusLink
+          ? {
+              rowIndex: r.rowIndex,
+              text: statusLink.textContent.trim(),
+              href: statusLink.getAttribute("href"),
+            }
+          : {
+              rowIndex: r.rowIndex,
+              text: r.statusEl.textContent.trim().replace(/\s+/g, " "),
+            };
+      });
+
+      buildReport(workbook, rows);
+    } else {
+      // No source file (listing page flow) — build a fresh report from the
+      // preview rows themselves.
+      workbook = buildOctaneReportWorkbook(ExcelJS, state.bulkRows);
+    }
 
     const ts = new Date();
     const pad = (n) => String(n).padStart(2, "0");
     const stamp = `${pad(ts.getDate())}_${pad(ts.getMonth() + 1)}_${ts.getFullYear()}_${pad(ts.getHours())}_${pad(ts.getMinutes())}_${pad(ts.getSeconds())}`;
+    const siteTag = String(state.bulkRows[0]?.site || "Octane").toLowerCase();
 
     downloadBlob(
-      `Octane_jira_export_${stamp}.${state.importExt || "xlsx"}`,
+      `${siteTag}_jira_export_${stamp}.${state.importExt || "xlsx"}`,
       await workbook.xlsx.writeBuffer(),
     );
   } catch (err) {
     console.error("ExcelJS export failed:", err);
     setStatus("Couldn't download the report.", "error");
   }
+}
+
+// Builds a Status/ID/Name/Description workbook straight from the preview rows
+// when there is no source file to stamp (the listing page import flow).
+export function buildOctaneReportWorkbook(ExcelJS, bulkRows) {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("Report");
+
+  const headerFont = {
+    name: "Arial",
+    size: 11,
+    bold: true,
+    color: { argb: "FFFFFFFF" },
+  };
+  const headerFill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF0097EF" },
+  };
+  const linkFont = {
+    name: "Calibri",
+    size: 11,
+    underline: "single",
+    color: { argb: "FF0000FF" },
+  };
+
+  sheet.columns = [
+    { header: "Status", width: 24 },
+    { header: "ID", width: 14 },
+    { header: "Name", width: 40 },
+    { header: "Description", width: 50 },
+  ];
+
+  sheet.getRow(1).eachCell((cell) => {
+    cell.font = headerFont;
+    cell.fill = headerFill;
+  });
+
+  bulkRows.forEach((r, i) => {
+    const row = sheet.getRow(i + 2);
+
+    const statusLink = r.statusEl.querySelector("a");
+    if (statusLink) {
+      const cell = row.getCell(1);
+      cell.value = {
+        text: statusLink.textContent.trim(),
+        hyperlink: statusLink.getAttribute("href"),
+      };
+      cell.font = linkFont;
+    } else {
+      row.getCell(1).value = r.statusEl.textContent.trim().replace(/\s+/g, " ");
+    }
+
+    const idCell = row.getCell(2);
+    if (r.sourceUrl) {
+      idCell.value = { text: r.idText || r.sourceUrl, hyperlink: r.sourceUrl };
+      idCell.font = linkFont;
+    } else {
+      idCell.value = r.idText || "";
+    }
+
+    row.getCell(3).value = r.name || "";
+    row.getCell(4).value = r.description || "";
+  });
+
+  return workbook;
 }
 
 export function downloadBlob(filename, data) {

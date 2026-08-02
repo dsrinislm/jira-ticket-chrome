@@ -483,8 +483,17 @@ button:disabled {
 }
 
 #bulkLoginBtn,
-#exportBtn {
+#exportBtn,
+#listingImportBtn {
   width: 100%;
+}
+
+#listingImportBtn {
+  margin-top: 10px;
+}
+
+#listingImportBtn .btn-icon {
+  transform: translateY(2px);
 }
 
 .btn-ghost:hover {

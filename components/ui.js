@@ -60,6 +60,8 @@ export const selectAllCheckbox = el("selectAllCheckbox");
 export const selectAllLabel = document.querySelector(".select-all");
 export const selectionCount = el("selectionCount");
 export const importBtn = el("importBtn");
+export const listingImportBtn = el("listingImportBtn");
+export const listingImportLabel = el("listingImportLabel");
 export const dropzone = document.querySelector(".file-dropzone");
 export const dropzoneTitle = el("dropzoneTitle");
 export const dropzoneHint = el("dropzoneHint");
@@ -124,6 +126,7 @@ export function setBulkBusy(isBusy) {
   importBtn.disabled = isBusy;
   importBtn.dataset.loading = isBusy ? "true" : "false";
   fileInput.disabled = isBusy;
+  listingImportBtn.disabled = isBusy;
 }
 
 export function switchView(view) {
@@ -352,74 +355,86 @@ function updateClampToggles() {
   });
 }
 
-export function loadBulkRows(rows, site = "Octane") {
-  previewBody.innerHTML = "";
-  state.bulkRows = [];
-
+// Adds a single row to the bulk preview and returns it. Used both by
+// loadBulkRows (Excel reports render all rows at once) and by the Octane
+// page flow, which lists each scraped ticket as it is processed.
+export function addBulkRow(record, site = "Octane") {
   const siteTag = String(site || "Octane").toUpperCase();
-  const fragment = document.createDocumentFragment();
+  const titleParts = [siteTag, record.idText, record.name].filter(Boolean);
+  const title = record.title || titleParts.join(" | ");
+  const tr = document.createElement("tr");
 
-  rows.forEach((record) => {
-    const titleParts = [siteTag, record.idText, record.name].filter(Boolean);
-    const title = titleParts.join(" | ");
-    const tr = document.createElement("tr");
+  const checkTd = document.createElement("td");
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = true;
+  checkbox.addEventListener("change", updateSelectionCount);
+  checkTd.appendChild(checkbox);
 
-    const checkTd = document.createElement("td");
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = true;
-    checkbox.addEventListener("change", updateSelectionCount);
-    checkTd.appendChild(checkbox);
-
-    const idTd = document.createElement("td");
-    idTd.className = "row-id";
-    if (record.sourceUrl) {
-      const link = document.createElement("a");
-      link.href = record.sourceUrl;
-      link.title = record.sourceUrl;
-      link.textContent = record.idText || record.sourceUrl;
-      link.rel = "noopener noreferrer";
-      link.addEventListener("click", (e) => {
-        e.preventDefault();
-        chrome.tabs.create({ url: record.sourceUrl });
-      });
-      idTd.appendChild(link);
-    } else {
-      idTd.textContent = "—";
-    }
-
-    const titleTd = document.createElement("td");
-    titleTd.appendChild(createClampedCell(title, "row-title"));
-
-    const descTd = document.createElement("td");
-    descTd.appendChild(createClampedCell(record.description, "row-desc"));
-
-    const statusTd = document.createElement("td");
-    statusTd.className = "row-status";
-    statusTd.dataset.state = "pending";
-    statusTd.textContent = "Not started";
-
-    tr.append(checkTd, idTd, titleTd, descTd, statusTd);
-    fragment.appendChild(tr);
-
-    state.bulkRows.push({
-      rowIndex: record.rowIndex,
-      title,
-      name: record.name,
-      description: record.description,
-      sourceUrl: record.sourceUrl,
-      idText: record.idText,
-      checkbox,
-      statusEl: statusTd,
-      tr,
+  const idTd = document.createElement("td");
+  idTd.className = "row-id";
+  if (record.sourceUrl) {
+    const link = document.createElement("a");
+    link.href = record.sourceUrl;
+    link.title = record.sourceUrl;
+    link.textContent = record.idText || record.sourceUrl;
+    link.rel = "noopener noreferrer";
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      chrome.tabs.create({ url: record.sourceUrl });
     });
-  });
+    idTd.appendChild(link);
+  } else if (record.idText) {
+    // No link (e.g. a Spark export whose Number cell is plain text) — still
+    // show the incident number instead of leaving the cell empty.
+    idTd.textContent = record.idText;
+  } else {
+    idTd.textContent = "—";
+  }
 
-  previewBody.appendChild(fragment);
+  const titleTd = document.createElement("td");
+  const titleEl = createClampedCell(title, "row-title");
+  titleTd.appendChild(titleEl);
+
+  const descTd = document.createElement("td");
+  descTd.appendChild(createClampedCell(record.description, "row-desc"));
+
+  const statusTd = document.createElement("td");
+  statusTd.className = "row-status";
+  statusTd.dataset.state = "pending";
+  statusTd.textContent = "Not started";
+
+  tr.append(checkTd, idTd, titleTd, descTd, statusTd);
+  previewBody.appendChild(tr);
+
+  const row = {
+    rowIndex: record.rowIndex,
+    title,
+    name: record.name,
+    description: record.description,
+    sourceUrl: record.sourceUrl,
+    idText: record.idText,
+    site: String(site || "Octane"),
+    checkbox,
+    statusEl: statusTd,
+    titleEl,
+    tr,
+  };
+  state.bulkRows.push(row);
+
   previewSection.style.display = "block";
   selectAllLabel?.classList.remove("hidden");
   updateSelectionCount();
   updateClampToggles();
+
+  return row;
+}
+
+export function loadBulkRows(rows, site = "Octane") {
+  previewBody.innerHTML = "";
+  state.bulkRows = [];
+
+  rows.forEach((record) => addBulkRow(record, site));
 
   // The freshly populated preview can push the import CTA and the status
   // message below the fold; glide all the way down so the whole status bar is
