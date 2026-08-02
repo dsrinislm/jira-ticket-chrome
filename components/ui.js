@@ -254,7 +254,7 @@ export function setBulkBusy(isBusy) {
   listingImportBtn.disabled = isBusy;
 }
 
-export function switchView(view) {
+export function switchView(view, focusTab = true) {
   const isBulk = view === "bulk";
 
   singleView.hidden = isBulk;
@@ -278,7 +278,28 @@ export function switchView(view) {
     );
   }
 
-  (isBulk ? tabBulk : tabSingle)?.focus?.({ preventScroll: true });
+  // Only user-initiated switches (the tab buttons) move focus onto the tab.
+  // Automated switches (e.g. disabling the single tab on an unsupported page)
+  // must leave focus where it is so the initial focus on the Base URL field
+  // isn't stolen.
+  if (focusTab) {
+    (isBulk ? tabBulk : tabSingle)?.focus?.({ preventScroll: true });
+  }
+}
+
+// The "Current Ticket" flow only works while the active tab is a detected
+// Spark/Octane ticket. When the site can't be matched (e.g. an unsupported
+// page), the tab is disabled so the user lands on Bulk Import instead.
+export function setSingleTabEnabled(enabled) {
+  const isEnabled = Boolean(enabled);
+  tabSingle.disabled = !isEnabled;
+  tabSingle.setAttribute("aria-disabled", String(!isEnabled));
+  tabSingle.title = isEnabled
+    ? ""
+    : "Open a Spark or Octane ticket to use this.";
+  if (!isEnabled && bulkView.hidden) {
+    switchView("bulk", false);
+  }
 }
 
 export function updateBulkStatusMessage() {

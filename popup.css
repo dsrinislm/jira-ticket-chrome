@@ -776,6 +776,12 @@ button:disabled {
   box-shadow: var(--shadow-xs);
 }
 
+.tab-btn:disabled,
+.tab-btn:disabled:hover {
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
 /* Bulk view */
 
 .file-dropzone {

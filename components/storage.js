@@ -20,6 +20,13 @@ export function loadInitialState() {
       // field yet, so this only takes effect after blur.
 
       renderProjectHistory(data.projectHistory || []);
+
+      // Accessibility: when no Jira details are configured yet, land focus on
+      // the Base URL field so keyboard / screen-reader users start on the
+      // first required input instead of the document body.
+      if (!jiraBaseUrlInput.value.trim() && !projectKeyInput.value.trim()) {
+        jiraBaseUrlInput.focus();
+      }
     },
   );
 

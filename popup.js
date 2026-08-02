@@ -16,6 +16,7 @@ import {
   setSourceSite,
   setSourceSiteLocked,
   setSourceSiteVisible,
+  setSingleTabEnabled,
   setStatus,
   setBusy,
   setBulkBusy,
@@ -128,7 +129,14 @@ jiraBaseUrlInput.addEventListener("input", (e) => {
     jiraBaseUrlInput.value.trim() &&
     projectKeyInput.value.trim()
   ) {
-    createTicketBtn.focus();
+    // After a paste fills both Jira fields, move focus to the next actionable
+    // control for the active view: the upload dropzone when bulk-importing
+    // (e.g. no Spark/Octane ticket open), otherwise the create-ticket CTA.
+    if (!bulkView.hidden) {
+      fileInput.focus();
+    } else {
+      createTicketBtn.focus();
+    }
   }
 });
 
@@ -250,10 +258,14 @@ async function applyDetectedState() {
     ({ site, listing } = await detectTabState());
   } catch {
     setSourceSiteVisible(false);
+    setSingleTabEnabled(false);
     return;
   }
 
   const matched = site !== null;
+  // The single-ticket flow needs a Spark/Octane ticket in the active tab;
+  // otherwise the "Current Ticket" tab is disabled and only bulk import works.
+  setSingleTabEnabled(matched);
   // Select first so the lock keeps the right site's button enabled.
   if (matched) setSourceSite(site);
   setSourceSiteVisible(matched);
@@ -908,6 +920,7 @@ async function createTicket() {
         includeAttachments,
         selectedAttachments,
         captureAttachments: false,
+        captureEmbeddedImages: false,
       });
     } catch {
       pageData = null;
@@ -1003,6 +1016,9 @@ async function createTicket() {
             selectedAttachments: missing.map((img) =>
               imageUploadFilename(img),
             ),
+            // Sync only cares about the missing attachment files — the
+            // description is left untouched, so skip embedded images.
+            captureEmbeddedImages: false,
           }).catch(() => null);
 
           if (!captured?.images?.length) {
@@ -1045,15 +1061,27 @@ async function createTicket() {
       return;
     }
 
-    // New ticket: download the selected attachments' bytes now (phase 1 only
-    // listed them), producing the placeholders the description needs.
+    // New ticket: produce the final description. Images embedded in the
+    // description are inline content, so they're captured and uploaded with
+    // placeholders regardless of the attachments checkbox — attachment files
+    // still follow the checkbox and the picker selection. Phase 1 only
+    // listed names, so the bytes are downloaded here.
+    const hasEmbeddedImages = /<img[^>]*>/i.test(pageData.html || "");
     let capturedData = pageData;
-    if (includeAttachments && pageData.images?.length) {
+    if (hasEmbeddedImages || (includeAttachments && pageData.images?.length)) {
       const captured = await getPageData(getSourceSite(), {
         includeAttachments,
         selectedAttachments,
       }).catch(() => null);
-      if (captured?.images?.length) capturedData = captured;
+      if (captured) {
+        capturedData = captured.images?.some((img) => img.dataUrl)
+          ? captured
+          : { ...captured, images: [] };
+      } else {
+        // Re-capture failed — keep the phase-1 data but drop the name-only
+        // metadata so it's never mistaken for real captured bytes.
+        capturedData = { ...pageData, images: [] };
+      }
     }
 
     const bodyAdf = htmlToADF(capturedData.html);
@@ -1074,7 +1102,7 @@ async function createTicket() {
     );
 
     let attachReport = { failed: 0 };
-    if (includeAttachments && capturedData.images?.length) {
+    if (capturedData.images?.length) {
       attachReport = await attachImagesToIssue(
         jiraOrigin,
         issue.key,

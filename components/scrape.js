@@ -82,6 +82,13 @@ export async function scrapeInPage(site, options = {}) {
   // files a Jira ticket is actually missing before paying for the slow byte
   // downloads — files that already exist are never fetched.
   const captureAttachments = options.captureAttachments !== false;
+  // When false, the description's embedded images are left untouched and NOT
+  // downloaded (the popup's metadata pass and existing-ticket sync both pass
+  // it, so they never pay for description-image bytes). When true — the
+  // default — embedded images are captured and uploaded with placeholders
+  // REGARDLESS of the attachments checkbox: they're inline description
+  // content, not selectable attachment files.
+  const captureEmbeddedImages = options.captureEmbeddedImages !== false;
 
   const textOf = (el) => {
     if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
@@ -182,8 +189,12 @@ export async function scrapeInPage(site, options = {}) {
     } else {
       // Rich description — extract embedded images to data URLs and swap in
       // placeholders, mirroring the DOM path so htmlToADF sees the same shape.
+      // Embedded images are inline description content, so they follow
+      // `captureEmbeddedImages` on their own — independent of the attachments
+      // checkbox (`includeAttachments`), which only governs the attachment
+      // files listed in the picker.
       const doc = new DOMParser().parseFromString(raw, "text/html");
-      if (captureAttachments) {
+      if (captureEmbeddedImages) {
         let imgIndex = 0;
         for (const imgEl of Array.from(doc.querySelectorAll("img"))) {
           if (!imgEl.src) {
@@ -437,7 +448,7 @@ export async function scrapeInPage(site, options = {}) {
           sources.push({ url: href, name });
         }
       } else {
-        if (captureAttachments === false) continue;
+        if (captureAttachments === false || captureEmbeddedImages === false) continue;
         // Embedded images have no attachment name to match against the
         // picker, so they follow the toggle rather than the name selection —
         // except an explicit "deselected everything" still means upload none.
