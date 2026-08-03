@@ -1,4 +1,4 @@
-import { redirectToLogin } from "./ui.js";
+import { redirectToLogin, MAX_ATTACHMENT_UPLOAD_BYTES } from "./ui.js";
 import { sleep } from "./util.js";
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
@@ -300,6 +300,7 @@ function xhrUpload(url, blob, filename, onProgress, onXhr) {
         ok: xhr.status >= 200 && xhr.status < 300,
         status: xhr.status,
         data,
+        raw: xhr.responseText,
       });
     };
     xhr.onerror = () => reject(new TypeError("Network error"));
@@ -337,12 +338,33 @@ async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename, onPro
 
   if (!response.ok) {
     if (response.status === 401) {
-      // Not a session problem — the session was already validated and small
-      // files upload fine. Atlassian's edge proxy rejects large request
-      // bodies (roughly above 25-30 MB) with 401 instead of 413; the Jira
-      // Cloud UI is the only path that accepts them.
+      // A 401 on an attachment upload is not always the size gateway: Jira's
+      // API also answers 401 for session/permission problems, and it says so
+      // with a JSON error message. The edge proxy that rejects oversized
+      // request bodies (~25-30 MB) instead returns 401 with a plain error
+      // page (no JSON). Only claim "too large" when the file is actually at
+      // the size ceiling — a 5 MB file failing with a 401 is an auth/session
+      // problem, not something the user can fix by splitting the file.
+      console.warn(
+        `Jira attachment upload 401: file="${filename}" bytes=${blob.size} status=${response.status}`,
+        response.raw && String(response.raw).slice(0, 300),
+      );
+      const jiraMessage =
+        response.data?.errorMessages?.[0] ||
+        response.data?.error ||
+        response.data?.message;
+      if (jiraMessage) {
+        throw new Error(
+          `Jira rejected the upload (401): ${jiraMessage} — re-login to Jira and try again.`,
+        );
+      }
+      if (blob.size >= MAX_ATTACHMENT_UPLOAD_BYTES) {
+        throw new Error(
+          "Jira Cloud rejected the upload (401): Atlassian's gateway refuses attachments over ~25-30 MB via the API. Upload this file from the Jira UI, or split/compress it.",
+        );
+      }
       throw new Error(
-        "Jira Cloud rejected the upload (401): Atlassian's gateway refuses attachments over ~25-30 MB via the API. Upload this file from the Jira UI, or split/compress it.",
+        "Jira Cloud rejected the upload (401): the Jira session likely expired. Re-login to Jira and try again.",
       );
     }
     throw new Error(`Image upload failed (status ${response.status}).`);

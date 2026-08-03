@@ -703,7 +703,7 @@ button:disabled {
 .ticket-card {
   background: var(--surface);
   padding: 14px 16px;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border);
   border-left: 3px solid var(--success);
@@ -986,6 +986,11 @@ button:disabled {
   cursor: pointer;
 }
 
+.attach-toggle input[type="checkbox"]:disabled {
+  cursor: default;
+  opacity: 0.75;
+}
+
 .attach-toggle-label {
   display: flex;
   align-items: center;
@@ -993,6 +998,35 @@ button:disabled {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-secondary);
+}
+
+/* Inline spinner next to the "Include attachments" toggle, shown only while
+   the popup queries Jira for which files are already synced. */
+.attach-progress {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+
+.attach-progress[hidden] {
+  display: none;
+}
+
+.attach-progress::before {
+  content: "";
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: attach-spin 0.7s linear infinite;
+}
+
+@keyframes attach-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .attachment-picker {
@@ -1095,6 +1129,9 @@ button:disabled {
 }
 
 .attachment-group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 10.5px;
   font-weight: 600;
   text-transform: uppercase;
@@ -1103,14 +1140,65 @@ button:disabled {
   margin: 0 0 2px;
 }
 
+.attachment-group-title input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex: none;
+}
+
+.attachment-group-title input[type="checkbox"]:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
 .attachment-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 11.5px;
-  padding: 1px 0;
+  padding: 1px 0 1px 18px;
   cursor: pointer;
   color: var(--text-secondary);
+}
+
+/* Subtree alignment: a vertical guide line runs down the ticket's children,
+   with a short horizontal tick connecting each attachment back to the parent
+   ticket row. */
+.attachment-item::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 8px;
+  width: 1px;
+  background: var(--border);
+}
+
+.attachment-item::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 8px;
+  width: 9px;
+  height: 1px;
+  background: var(--border);
+}
+
+.attachment-item:last-of-type::before {
+  height: 50%;
+}
+
+.attachment-item.attachment-item-synced {
+  color: var(--text-muted);
+  cursor: default;
+  opacity: 0.8;
+}
+
+.attachment-item.attachment-item-synced input[type="checkbox"] {
+  cursor: default;
 }
 
 .attachment-item input[type="checkbox"] {

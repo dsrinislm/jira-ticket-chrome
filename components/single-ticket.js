@@ -7,11 +7,12 @@ import {
   getIncludeAttachments,
   getSelectedAttachments,
   redirectToLogin,
-  ticketResult,
+  resetTicketCard,
   revealStatus,
   updateSyncProgress,
   setSyncProgressVisible,
   syncAbortBtn,
+  markAttachmentsSynced,
 } from "./ui.js";
 import { getJiraContext } from "./validation.js";
 import { saveSettings, saveProjectHistory } from "./storage.js";
@@ -42,7 +43,7 @@ export async function createTicket() {
     saveSettings();
 
     hideLoginButtons();
-    ticketResult.innerHTML = "";
+    resetTicketCard();
 
     const { jiraOrigin, projectKey } = getJiraContext() || {};
     if (!jiraOrigin || !projectKey) return;
@@ -196,6 +197,9 @@ export async function createTicket() {
               ),
           );
           setSyncProgressVisible(false);
+          // The files this run actually uploaded are now synced — mark them
+          // checked + disabled in the open picker so a re-run reflects it.
+          markAttachmentsSynced(attachReport.uploadedNames);
           if (attachReport.cancelled) {
             setStatus(
               `Upload stopped. ${existing.issue.key} attachments not synced.`,
@@ -215,9 +219,9 @@ export async function createTicket() {
             return;
           }
           setStatus(
-            attachReport.skipped > 0
-              ? `Ticket already exists: ${existing.issue.key}. Selected attachments up to date.`
-              : `Ticket already exists: ${existing.issue.key}. Missing attachments uploaded.`,
+            attachReport.uploaded > 0
+              ? `Ticket already exists: ${existing.issue.key}. ${attachReport.uploaded} missing attachment(s) uploaded.`
+              : `Ticket already exists: ${existing.issue.key}. Selected attachments up to date.`,
             "success",
           );
         }
@@ -287,6 +291,9 @@ export async function createTicket() {
           ),
       );
     }
+    // The files this run actually uploaded are now synced — mark them checked
+    // + disabled in the open picker so a re-run reflects it.
+    markAttachmentsSynced(attachReport.uploadedNames);
 
     const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
     if (attachReport.cancelled) {

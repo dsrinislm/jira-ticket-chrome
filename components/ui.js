@@ -20,12 +20,14 @@ export const sourceSiteInput = el("sourceSiteInput");
 export const sourceSiteLabels = document.querySelectorAll(".site-toggle-label");
 export const includeAttachmentsInput = el("includeAttachments");
 export const attachmentPicker = el("attachmentPicker");
+export const attachmentPickerTitle = el("attachmentPickerTitle");
 export const attachmentGroups = el("attachmentGroups");
 export const attachmentSelectAll = el("attachmentSelectAll");
 export const attachmentNote = el("attachmentNote");
 export const bulkAttachmentSection = el("bulkAttachmentSection");
 export const bulkIncludeAttachments = el("bulkIncludeAttachments");
 export const bulkAttachmentPicker = el("bulkAttachmentPicker");
+export const bulkAttachmentPickerTitle = el("bulkAttachmentPickerTitle");
 export const bulkAttachmentGroups = el("bulkAttachmentGroups");
 export const bulkAttachmentSelectAll = el("bulkAttachmentSelectAll");
 export const bulkAttachmentNote = el("bulkAttachmentNote");
@@ -80,6 +82,10 @@ export function setAttachmentPickerLoading() {
   expandAttachmentPicker(attachmentPicker);
   attachmentGroups.innerHTML = "";
   setAttachmentNote("");
+  attachmentPickerHasNoAttachments = false;
+  updateAttachmentSelectAll();
+  updateAttachmentIncludeSyncState();
+  setAttachmentSyncProgress(true);
   state.attachmentSelection = null;
 }
 
@@ -87,8 +93,56 @@ export function clearAttachmentPicker() {
   attachmentPicker.hidden = true;
   attachmentGroups.innerHTML = "";
   setAttachmentNote("");
+  attachmentPickerHasNoAttachments = false;
+  setAttachmentSyncProgress(false);
   attachmentSelectAll.checked = true;
   state.attachmentSelection = null;
+  // Turning the picker off means the "fully synced" verdict no longer holds —
+  // re-show the Create/Sync CTA and re-enable the toggle.
+  syncedTicketFound = false;
+  updateAttachmentIncludeSyncState();
+}
+
+// Shows/hides the inline spinner next to the "Include attachments" toggle.
+// Used only while the popup is querying Jira for already-synced files.
+export function setAttachmentSyncProgress(visible) {
+  const el = document.getElementById("attachmentSyncProgress");
+  if (!el) return;
+  el.hidden = !visible;
+}
+
+// Set while the picker shows the "No attachments found." message — treated as
+// "nothing to upload", so the include toggle gets marked checked + disabled.
+let attachmentPickerHasNoAttachments = false;
+
+// True while the picker knows the source ticket already exists on Jira (found
+// by the handshake). Combined with "every listed attachment already synced",
+// that means the Create/Sync CTA has nothing left to do — the UI hides the
+// button and points the user at a fresh ticket instead.
+let syncedTicketFound = false;
+
+// True once the Create/Sync CTA has actually run and rendered the ticket card
+// (renderTicketCard) for the current ticket session. The "fully synced" verdict
+// only hides the CTA once the card is on screen — the include-toggle handshake
+// alone finding the ticket isn't enough, because the user may still want to
+// click the CTA to retrieve the existing ticket.
+let ticketCardShown = false;
+
+// Records whether the picker's handshake located the source ticket on Jira.
+// Re-evaluates the include-toggle + Create/Sync CTA state right away so a
+// fully-synced verdict can hide the button the moment it's known.
+export function setSyncedTicketFound(found) {
+  syncedTicketFound = Boolean(found);
+  updateAttachmentIncludeSyncState();
+}
+
+// Marks the start of a fresh Create/Sync run or a navigation to a new ticket:
+// clears the previous ticket card and forgets it was rendered, so the "fully
+// synced" CTA-hide only re-applies once the new card is actually on screen.
+export function resetTicketCard() {
+  ticketCardShown = false;
+  if (ticketResult) ticketResult.innerHTML = "";
+  updateAttachmentIncludeSyncState();
 }
 
 // Jira Cloud's gateway rejects attachment uploads above ~25 MB with a 401
@@ -155,11 +209,19 @@ function formatBytes(bytes) {
   return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
 }
 
-export function renderAttachmentPicker(items) {
+// items: [{ name, size, sizeBytes, type }]; syncedNames: a Set of filenames
+// already on Jira for this ticket. Already-synced files stay checked but
+// disabled (grayed) and are left out of the selection — the sync only
+// re-uploads what's actually missing. Mirrors renderBulkAttachmentPicker.
+export function renderAttachmentPicker(items, syncedNames = new Set()) {
   attachmentPicker.hidden = false;
   expandAttachmentPicker(attachmentPicker);
   attachmentGroups.innerHTML = "";
-  state.attachmentSelection = items.map((i) => i.name);
+  attachmentPickerHasNoAttachments = false;
+  state.attachmentSelection = [];
+  if (attachmentPickerTitle) {
+    attachmentPickerTitle.textContent = `Choose attachments to upload (${items.length})`;
+  }
 
   const grouped = { video: [], image: [], other: [] };
   for (const item of items) {
@@ -168,8 +230,10 @@ export function renderAttachmentPicker(items) {
     grouped[type].push(item);
   }
 
+  let anyFiles = false;
   for (const [type, list] of Object.entries(grouped)) {
     if (!list.length) continue;
+    anyFiles = true;
     const group = document.createElement("div");
     group.className = "attachment-group";
 
@@ -183,23 +247,34 @@ export function renderAttachmentPicker(items) {
     group.appendChild(title);
 
     for (const item of list) {
+      const alreadySynced = syncedNames.has(item.name);
+      // Every rendered (non-synced) file starts checked — its name is part
+      // of the selection from the start. The picker initializes the selection
+      // to exactly these names; an empty array would mean "upload nothing".
+      if (!alreadySynced) state.attachmentSelection.push(item.name);
       const row = document.createElement("label");
-      row.className = "attachment-item";
+      row.className = "attachment-item" + (alreadySynced ? " attachment-item-synced" : "");
 
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = true;
       checkbox.dataset.name = item.name;
+      if (alreadySynced) {
+        checkbox.disabled = true;
+        checkbox.title = "Already on Jira — will be skipped on sync";
+      }
       checkbox.addEventListener("change", () => {
+        if (alreadySynced) return;
         const selected = state.attachmentSelection || [];
         state.attachmentSelection = checkbox.checked
           ? [...selected, item.name]
           : selected.filter((n) => n !== item.name);
+        updateAttachmentSelectAll();
       });
 
       const name = document.createElement("span");
       name.className = "attachment-item-name";
-      name.textContent = item.name;
+      name.textContent = item.name + (alreadySynced ? " · synced" : "");
       const tip = [];
       if (item.description) tip.push(item.description);
       if (item.size) tip.push(`Size: ${item.size}`);
@@ -215,6 +290,124 @@ export function renderAttachmentPicker(items) {
 
     attachmentGroups.appendChild(group);
   }
+
+  if (!anyFiles) {
+    attachmentGroups.innerHTML =
+      '<div class="attachment-group-title">No attachments found.</div>';
+    attachmentPickerHasNoAttachments = true;
+  }
+
+  updateAttachmentSelectAll();
+  updateAttachmentIncludeSyncState();
+}
+
+// True while the single-ticket flow is running (setBusy). The select-all
+// toggle is hidden during that whole run — choosing attachments mid-upload is
+// pointless, and the picker is collapsed to keep progress front and center.
+let singleBusy = false;
+
+// Keeps the picker's global select-all in step with the attachment checkboxes,
+// looking only at files that still need syncing (disabled ones are ignored).
+// The toggle is hidden while a run is in flight and when there are no
+// attachments, or when every attachment is already uploaded to Jira.
+function updateAttachmentSelectAll() {
+  if (!attachmentSelectAll) return;
+  const allBoxes = attachmentGroups.querySelectorAll(
+    ".attachment-item input[type='checkbox']",
+  );
+
+  const boxes = attachmentGroups.querySelectorAll(
+    ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
+  );
+  // Nothing left to select — either a run is in flight, there are no
+  // attachments at all, or every one is already uploaded (disabled). Drop the
+  // Select-all toggle entirely.
+  const toggle = attachmentSelectAll.closest(".attachment-picker-toggle");
+  toggle?.classList.toggle("hidden", singleBusy || boxes.length === 0);
+  let checked = 0;
+  for (const box of boxes) if (box.checked) checked++;
+
+  if (boxes.length === 0) {
+    // Every attachment is already on Jira (or none exist) — keep the toggle
+    // disabled+checked underneath so a later re-render starts consistent.
+    attachmentSelectAll.checked = allBoxes.length > 0;
+    attachmentSelectAll.disabled = allBoxes.length > 0;
+    attachmentSelectAll.indeterminate = false;
+    return;
+  }
+  attachmentSelectAll.disabled = false;
+  attachmentSelectAll.checked = checked > 0 && checked === boxes.length;
+  attachmentSelectAll.indeterminate = checked > 0 && checked < boxes.length;
+}
+
+// Reflects "everything already on Jira" back onto the Include-attachments
+// toggle: when every listed attachment is already synced — found via the Jira
+// handshake, or after a sync uploaded them — the toggle is marked checked +
+// disabled and the picker is expanded to show the state. Otherwise the toggle
+// is left enabled for the user.
+function updateAttachmentIncludeSyncState() {
+  if (!includeAttachmentsInput) return;
+  const allBoxes = attachmentGroups.querySelectorAll(
+    ".attachment-item input[type='checkbox']",
+  );
+  const boxes = attachmentGroups.querySelectorAll(
+    ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
+  );
+  const allSynced =
+    attachmentPickerHasNoAttachments ||
+    (allBoxes.length > 0 && boxes.length === 0);
+  if (allSynced) {
+    includeAttachmentsInput.checked = true;
+    includeAttachmentsInput.disabled = true;
+    expandAttachmentPicker(attachmentPicker);
+  } else {
+    includeAttachmentsInput.disabled = false;
+  }
+
+  // When the CTA has already run and rendered the ticket card for a ticket
+  // that's fully synced on Jira — the handshake found it AND every listed
+  // attachment is already uploaded — there's nothing left to do. Hide the
+  // whole button group (not just the button — an empty group keeps its
+  // margin and would leave a gap) and tell the user to move on to a fresh
+  // ticket. Until the card is actually on screen the CTA stays clickable so
+  // the user can retrieve the existing ticket.
+  const fullySyncedTicket = syncedTicketFound && allSynced && ticketCardShown;
+  const buttonGroup = createTicketBtn?.closest(".button-group");
+  if (buttonGroup) {
+    buttonGroup.style.display = fullySyncedTicket ? "none" : "";
+  }
+  if (fullySyncedTicket) {
+    setStatus("Ticket fully synced! try new one.", "success");
+  }
+}
+
+// After a single-ticket sync uploads files, marks the attachment names that
+// were actually uploaded to Jira as synced (checked + disabled) in the open
+// picker, so a re-run reflects what the sync just did. Embedded description
+// images are unaffected — their synthetic names never match a picker row.
+// uploadedNames: [filename, ...].
+export function markAttachmentsSynced(uploadedNames) {
+  if (!attachmentGroups || !uploadedNames?.length) return;
+  for (const name of uploadedNames) {
+    const box = attachmentGroups.querySelector(
+      `.attachment-item input[type='checkbox'][data-name="${CSS.escape(name)}"]`,
+    );
+    if (!box) continue;
+    const row = box.closest(".attachment-item");
+    if (row.classList.contains("attachment-item-synced")) continue;
+    box.checked = true;
+    box.disabled = true;
+    box.title = "Already on Jira — will be skipped on sync";
+    row.classList.add("attachment-item-synced");
+    const nameEl = row.querySelector(".attachment-item-name");
+    if (nameEl && !nameEl.textContent.includes("synced")) {
+      nameEl.textContent = `${name} · synced`;
+    }
+    const selected = state.attachmentSelection || [];
+    state.attachmentSelection = selected.filter((n) => n !== name);
+  }
+  updateAttachmentSelectAll();
+  updateAttachmentIncludeSyncState();
 }
 
 // --- Bulk-import attachment picker ------------------------------------------
@@ -296,12 +489,24 @@ export function setBulkAttachmentNote(message) {
   bulkAttachmentNote.textContent = message || "";
 }
 
+// Shows/hides the inline spinner next to the "Include attachments" toggle.
+// Used only while the popup is querying Jira for already-synced files.
+export function setBulkAttachmentSyncProgress(visible) {
+  const el = document.getElementById("bulkAttachmentSyncProgress");
+  if (!el) return;
+  el.hidden = !visible;
+}
+
 export function setBulkAttachmentPickerLoading() {
   if (!bulkAttachmentPicker) return;
   bulkAttachmentPicker.hidden = false;
   expandAttachmentPicker(bulkAttachmentPicker);
   bulkAttachmentGroups.innerHTML = "";
   setBulkAttachmentNote("");
+  bulkPickerHasNoAttachments = false;
+  updateBulkAttachmentSelectAll();
+  updateBulkIncludeSyncState();
+  setBulkAttachmentSyncProgress(true);
   state.bulkAttachmentSelection = null;
 }
 
@@ -309,18 +514,31 @@ export function clearBulkAttachmentPicker() {
   if (bulkAttachmentPicker) bulkAttachmentPicker.hidden = true;
   if (bulkAttachmentGroups) bulkAttachmentGroups.innerHTML = "";
   setBulkAttachmentNote("");
+  setBulkAttachmentSyncProgress(false);
   if (bulkAttachmentSelectAll) bulkAttachmentSelectAll.checked = true;
   state.bulkAttachmentSelection = null;
 }
 
 // groups: [{ id, attachments: [{ name, size, sizeBytes, type }] }]; labels:
-// { [id]: display text for the group title } (e.g. the INC number for Spark).
-export function renderBulkAttachmentPicker(groups, labels = {}) {
+// { [id]: display text for the group title } (e.g. the INC number for Spark);
+// syncedMap: { [id]: Set<name> } of attachment names already on Jira for that
+// ticket. Already-synced files stay checked but disabled (grayed) and are left
+// out of the selection — the import only re-uploads what's actually missing.
+export function renderBulkAttachmentPicker(groups, labels = {}, syncedMap = {}) {
   if (!bulkAttachmentPicker) return;
   bulkAttachmentPicker.hidden = false;
   expandAttachmentPicker(bulkAttachmentPicker);
   bulkAttachmentGroups.innerHTML = "";
+  bulkPickerHasNoAttachments = false;
   state.bulkAttachmentSelection = {};
+
+  const totalFiles = groups.reduce(
+    (sum, group) => sum + (group.attachments || []).length,
+    0,
+  );
+  if (bulkAttachmentPickerTitle) {
+    bulkAttachmentPickerTitle.textContent = `Choose attachments to upload (${totalFiles})`;
+  }
 
   let anyFiles = false;
   for (const group of groups) {
@@ -328,8 +546,11 @@ export function renderBulkAttachmentPicker(groups, labels = {}) {
     if (!files.length) continue;
     anyFiles = true;
 
-    const selection = files.map((f) => f.name);
-    state.bulkAttachmentSelection[String(group.id)] = selection;
+    const ticketId = String(group.id);
+    const synced = syncedMap[ticketId] || new Set();
+    // Only files that still need uploading are part of the selection.
+    const selectable = files.filter((f) => !synced.has(f.name));
+    state.bulkAttachmentSelection[ticketId] = selectable.map((f) => f.name);
 
     const block = document.createElement("div");
     block.className = "attachment-group";
@@ -340,30 +561,70 @@ export function renderBulkAttachmentPicker(groups, labels = {}) {
     );
     const totalSize = formatBytes(totalBytes);
 
+    // A checkbox on the ticket number checks/unchecks all of this ticket's
+    // remaining files (already-synced ones stay disabled).
     const title = document.createElement("div");
     title.className = "attachment-group-title";
-    title.textContent = `${labels[String(group.id)] || group.id} (${files.length})${totalSize ? ` · ${totalSize}` : ""}`;
+    const groupCheckbox = document.createElement("input");
+    groupCheckbox.type = "checkbox";
+    groupCheckbox.className = "attachment-group-check";
+    groupCheckbox.checked = selectable.length > 0;
+    groupCheckbox.disabled = selectable.length === 0;
+    groupCheckbox.dataset.ticket = ticketId;
+    groupCheckbox.title =
+      "Select all attachments of this ticket that aren't synced yet";
+    groupCheckbox.addEventListener("change", () => {
+      state.bulkAttachmentSelection[ticketId] = groupCheckbox.checked
+        ? selectable.map((f) => f.name)
+        : [];
+      block
+        .querySelectorAll(
+          ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
+        )
+        .forEach((box) => {
+          box.checked = groupCheckbox.checked;
+        });
+      updateBulkAttachmentSelectAll();
+    });
+
+    const titleText = document.createElement("span");
+    titleText.textContent = `${labels[ticketId] || group.id} (${files.length})${totalSize ? ` · ${totalSize}` : ""}`;
+    title.append(groupCheckbox, titleText);
     block.appendChild(title);
 
+    // Keep the raw group data on the block so the title can be refreshed in
+    // place when an import later marks some of its files as synced.
+    block.dataset.title = labels[ticketId] || String(group.id);
+    block.dataset.count = String(files.length);
+    block.dataset.size = totalSize;
+
     for (const item of files) {
+      const alreadySynced = synced.has(item.name);
       const row = document.createElement("label");
-      row.className = "attachment-item";
+      row.className = "attachment-item" + (alreadySynced ? " attachment-item-synced" : "");
 
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = true;
       checkbox.dataset.name = item.name;
-      checkbox.dataset.ticket = String(group.id);
+      checkbox.dataset.ticket = ticketId;
+      if (alreadySynced) {
+        checkbox.disabled = true;
+        checkbox.title = "Already on Jira — will be skipped on import";
+      }
       checkbox.addEventListener("change", () => {
-        const sel = state.bulkAttachmentSelection?.[String(group.id)] || [];
-        state.bulkAttachmentSelection[String(group.id)] = checkbox.checked
+        if (alreadySynced) return;
+        const sel = state.bulkAttachmentSelection?.[ticketId] || [];
+        state.bulkAttachmentSelection[ticketId] = checkbox.checked
           ? [...sel, item.name]
           : sel.filter((n) => n !== item.name);
+        updateGroupCheck(ticketId);
+        updateBulkAttachmentSelectAll();
       });
 
       const name = document.createElement("span");
       name.className = "attachment-item-name";
-      name.textContent = item.name;
+      name.textContent = item.name + (alreadySynced ? " · synced" : "");
       name.title = item.size ? `${item.name}\nSize: ${item.size}` : item.name;
 
       const size = document.createElement("span");
@@ -375,12 +636,195 @@ export function renderBulkAttachmentPicker(groups, labels = {}) {
     }
 
     bulkAttachmentGroups.appendChild(block);
+    updateGroupCheck(ticketId);
   }
 
   if (!anyFiles) {
     bulkAttachmentGroups.innerHTML =
       '<div class="attachment-group-title">No attachments found.</div>';
+    bulkPickerHasNoAttachments = true;
   }
+
+  updateBulkAttachmentSelectAll();
+  updateBulkIncludeSyncState();
+}
+
+// Keeps the picker's global select-all in step with the per-ticket checkboxes,
+// looking only at files that still need syncing (disabled ones are ignored).
+// The toggle is hidden entirely when the selected tickets have no attachments,
+// and shown checked when every attachment is already uploaded to Jira.
+function updateBulkAttachmentSelectAll() {
+  if (!bulkAttachmentSelectAll) return;
+  const allBoxes = bulkAttachmentGroups.querySelectorAll(
+    ".attachment-item input[type='checkbox']",
+  );
+
+  const boxes = bulkAttachmentGroups.querySelectorAll(
+    ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
+  );
+  // Nothing left to select — either there are no attachments at all, or every
+  // one is already uploaded (disabled). Drop the Select-all toggle entirely.
+  const toggle = bulkAttachmentSelectAll.closest(".attachment-picker-toggle");
+  toggle?.classList.toggle("hidden", boxes.length === 0);
+  let checked = 0;
+  for (const box of boxes) if (box.checked) checked++;
+
+  if (boxes.length === 0) {
+    // Every attachment is already on Jira (or none exist) — keep the toggle
+    // disabled+checked underneath so a later re-render starts consistent.
+    bulkAttachmentSelectAll.checked = allBoxes.length > 0;
+    bulkAttachmentSelectAll.disabled = allBoxes.length > 0;
+    bulkAttachmentSelectAll.indeterminate = false;
+    return;
+  }
+  bulkAttachmentSelectAll.disabled = false;
+  bulkAttachmentSelectAll.checked = checked > 0 && checked === boxes.length;
+  bulkAttachmentSelectAll.indeterminate = checked > 0 && checked < boxes.length;
+}
+
+// Set while the picker shows the "No attachments found." message — treated as
+// "nothing to upload", so the include toggle gets marked checked + disabled.
+let bulkPickerHasNoAttachments = false;
+
+// Reflects "everything already on Jira" back onto the Include-attachments
+// toggle: when every listed attachment is already synced — found via the Jira
+// handshake, or after an import uploaded them — the toggle is marked checked +
+// disabled and the picker is expanded to show the state. Otherwise the toggle
+// is left enabled for the user.
+function updateBulkIncludeSyncState() {
+  if (!bulkIncludeAttachments) return;
+  const allBoxes = bulkAttachmentGroups.querySelectorAll(
+    ".attachment-item input[type='checkbox']",
+  );
+  const boxes = bulkAttachmentGroups.querySelectorAll(
+    ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
+  );
+  const allSynced =
+    bulkPickerHasNoAttachments ||
+    (allBoxes.length > 0 && boxes.length === 0);
+  if (allSynced) {
+    bulkIncludeAttachments.checked = true;
+    bulkIncludeAttachments.disabled = true;
+    expandAttachmentPicker(bulkAttachmentPicker);
+  } else {
+    bulkIncludeAttachments.disabled = false;
+  }
+  // When the include toggle flips to the all-synced/disabled state, the
+  // listing sync CTA should disappear (nothing left to attach or re-run).
+  updateListingControls();
+}
+
+// Marks a ticket's select-all checkbox to match its child attachments: checked
+// when every remaining file is checked, unchecked when none are, indeterminate
+// in between — and disabled + checked when all of its attachments are already
+// uploaded to Jira (nothing left to select).
+function updateGroupCheck(ticketId) {
+  const groupCheck = bulkAttachmentGroups.querySelector(
+    `.attachment-group-check[data-ticket="${ticketId}"]`,
+  );
+  if (!groupCheck) return;
+  const group = groupCheck.closest(".attachment-group");
+  const allBoxes = group.querySelectorAll(
+    ".attachment-item input[type='checkbox']",
+  );
+  if (!allBoxes.length) return;
+  const boxes = group.querySelectorAll(
+    ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
+  );
+  if (!boxes.length) {
+    groupCheck.checked = true;
+    groupCheck.disabled = true;
+    groupCheck.indeterminate = false;
+    return;
+  }
+  groupCheck.disabled = false;
+  let checked = 0;
+  for (const box of boxes) if (box.checked) checked++;
+  groupCheck.checked = checked > 0 && checked === boxes.length;
+  groupCheck.indeterminate = checked > 0 && checked < boxes.length;
+}
+
+// Re-syncs every ticket's select-all checkbox (used after the global select-all
+// toggle flips all children at once).
+export function updateBulkGroupChecks() {
+  bulkAttachmentGroups
+    .querySelectorAll(".attachment-group-check")
+    .forEach((groupCheck) => updateGroupCheck(groupCheck.dataset.ticket));
+}
+
+// After a bulk run finishes, marks the attachment names that were actually
+// uploaded to Jira as synced (checked + disabled) in the open picker, so a
+// re-run reflects what the import just did without re-opening the handshake.
+// uploadedMap: { [ticketId]: [filename, ...] }.
+export function markBulkAttachmentsSynced(uploadedMap) {
+  if (!bulkAttachmentGroups || !uploadedMap) return;
+  for (const [ticketId, names] of Object.entries(uploadedMap)) {
+    if (!names || !names.length) continue;
+    for (const name of names) {
+      const box = bulkAttachmentGroups.querySelector(
+        `.attachment-item input[type='checkbox'][data-ticket="${ticketId}"][data-name="${CSS.escape(name)}"]`,
+      );
+      if (!box) continue;
+      const row = box.closest(".attachment-item");
+      if (row.classList.contains("attachment-item-synced")) continue;
+      box.checked = true;
+      box.disabled = true;
+      box.title = "Already on Jira — will be skipped on import";
+      row.classList.add("attachment-item-synced");
+      const nameEl = row.querySelector(".attachment-item-name");
+      if (nameEl && !nameEl.textContent.includes("synced")) {
+        nameEl.textContent = `${name} · synced`;
+      }
+      const sel = state.bulkAttachmentSelection?.[ticketId];
+      if (sel) {
+        state.bulkAttachmentSelection[ticketId] = sel.filter((n) => n !== name);
+      }
+    }
+    updateGroupCheck(ticketId);
+    refreshBulkGroupTitle(ticketId);
+  }
+  updateBulkAttachmentSelectAll();
+  updateBulkIncludeSyncState();
+}
+
+// Rebuilds a group's title ("label (N) · size") from the block's stored
+// metadata — the synced count isn't shown, so the refresh just needs to keep
+// the label/count/size consistent after an import marks files as synced.
+function refreshBulkGroupTitle(ticketId) {
+  const block = bulkAttachmentGroups.querySelector(
+    `.attachment-group-check[data-ticket="${ticketId}"]`,
+  )?.closest(".attachment-group");
+  const titleText = block?.querySelector(".attachment-group-title span");
+  if (!titleText) return;
+  const count = Number(block.dataset.count || 0);
+  const size = block.dataset.size || "";
+  titleText.textContent = `${block.dataset.title || ticketId} (${count})${size ? ` · ${size}` : ""}`;
+}
+
+// After the import handshake, disables preview rows for tickets that already
+// exist on Jira with every included attachment already uploaded — they'd be a
+// no-op anyway. Purely cosmetic; the worker skips missing files by name.
+export function markBulkRowsFullySynced(fullySyncedIds) {
+  if (!fullySyncedIds) return;
+  const ids = new Set(
+    Array.from(fullySyncedIds, (id) => String(id)),
+  );
+  for (const row of state.bulkRows || []) {
+    if (
+      row.statusEl.dataset.state === "created" ||
+      row.statusEl.dataset.state === "exists" ||
+      row.checkbox.disabled
+    ) {
+      continue;
+    }
+    if (row.rowIndex != null && ids.has(String(row.rowIndex))) {
+      row.checkbox.checked = true;
+      row.checkbox.disabled = true;
+      row.statusEl.dataset.state = "exists";
+      row.statusEl.textContent = "Already exists — attachments up to date";
+    }
+  }
+  updateSelectionCount();
 }
 
 export function getSourceSite() {
@@ -427,6 +871,7 @@ export const fileSummary = el("fileSummary");
 export const previewSection = el("previewSection");
 export const previewBody = el("previewBody");
 export const previewIdHeader = el("previewIdHeader");
+export const previewTitle = el("previewTitle");
 export const previewCollapseBtn = el("previewCollapseBtn");
 export const tableWrap = document.querySelector(".table-wrap");
 export const selectAllCheckbox = el("selectAllCheckbox");
@@ -503,12 +948,17 @@ export function setStatus(message, status = "info") {
 }
 
 export function setBusy(isBusy) {
+  singleBusy = Boolean(isBusy);
   createTicketBtn.disabled = isBusy;
   createTicketBtn.dataset.loading = isBusy ? "true" : "false";
   jiraBaseUrlInput.disabled = isBusy;
   projectKeyInput.disabled = isBusy;
   includeAttachmentsInput.disabled = isBusy;
   if (isBusy) collapseAttachmentPickers();
+  updateAttachmentSelectAll();
+  // After a run the busy guard is gone, so a sync that uploaded every
+  // attachment can mark the include toggle checked + disabled again.
+  if (!isBusy) updateAttachmentIncludeSyncState();
 }
 
 // Collapses any visible attachment picker so creation/progress is front and
@@ -575,7 +1025,12 @@ export function setBulkBusy(isBusy) {
   // with Select-all only if anything is still selectable.
   previewCollapseBtn?.classList.toggle("hidden", isBusy);
   selectAllLabel?.classList.toggle("hidden", isBusy);
-  if (!isBusy) updateBulkSelectAllVisibility();
+  if (!isBusy) {
+    updateBulkSelectAllVisibility();
+    // After a run the busy guard is gone, so an import that finished syncing
+    // every attachment can now expand the picker and mark the include toggle.
+    updateBulkIncludeSyncState();
+  }
 }
 
 // Remembers each view's scroll offset so switching tabs restores the user's
@@ -696,14 +1151,33 @@ export function setExcelFlowActive(active) {
   updateListingControls();
 }
 
+// True when a finished listing run has nothing left to do: every preview row
+// was created/synced (checked + disabled), every attachment is already on
+// Jira (the include toggle is checked + disabled), and the run's report is
+// available to download. In that resting state the "Sync selected … listing"
+// CTA is dropped — it would only re-run a no-op.
+function listingSyncDoneState() {
+  if (!bulkRowsFromListing || !state.bulkRows.length) return false;
+  const allRowsDone = state.bulkRows.every(
+    (r) => r.checkbox.checked && r.checkbox.disabled,
+  );
+  return (
+    allRowsDone &&
+    Boolean(bulkIncludeAttachments?.checked && bulkIncludeAttachments.disabled) &&
+    exportBtn.style.display !== "none"
+  );
+}
+
 // The listing-only controls show only when the active tab is a supported
-// listing with at least one ticked row AND no report is loaded.
+// listing with at least one ticked row AND no report is loaded. The sync CTA
+// additionally disappears when the whole listing is already synced.
 function updateListingControls() {
   const show =
     !excelFlowActive && Boolean(activeListingSite) && listingHasSelection;
   setBulkAttachmentSectionVisible(show);
-  listingImportBtn.style.display = show ? "block" : "none";
-  if (show) {
+  listingImportBtn.style.display =
+    show && !listingSyncDoneState() ? "block" : "none";
+  if (show && !listingSyncDoneState()) {
     listingImportLabel.textContent = `Sync selected ${activeListingSite} listing`;
   }
 }
@@ -726,11 +1200,16 @@ export function setDropzoneLoaded() {
   dropzone.dataset.loaded = "true";
   dropzoneTitle.textContent = "Upload Done";
   dropzoneIcon.innerHTML = DROPZONE_ICON_CHECK;
-  clearFileBtn.hidden = false;
   // An uploaded report means the Excel flow is the source of truth — the
   // listing CTA and include-attachments picker don't apply while it's loaded.
   setExcelFlowActive(true);
   setBulkRowsFromListing(false);
+  // The clear affordance only helps while a site import could actually run —
+  // an Octane or Spark listing with rows selected. Reflect the tab's last-known
+  // listing state right away so the chip never flashes on when it isn't
+  // applicable; the post-parse detection (excel.js) refines this once it
+  // resolves.
+  updateClearAffordance(activeListingSite, listingHasSelection ? 1 : 0);
 }
 
 export function resetDropzone() {
@@ -755,6 +1234,7 @@ export function clearFileUpload() {
   state.importExt = null;
   if (previewBody) previewBody.innerHTML = "";
   if (previewSection) previewSection.style.display = "none";
+  if (previewTitle) previewTitle.textContent = "Preview selected tickets";
   if (progressSection) progressSection.style.display = "none";
   if (exportBtn) exportBtn.style.display = "none";
   if (fileError) fileError.style.display = "none";
@@ -773,12 +1253,16 @@ clearFileBtn?.addEventListener("click", clearFileUpload);
 
 // The dropzone's clear affordance (the clear button and its "Click clear to
 // switch to … importing" hint) is only useful while a site import could
-// actually run. On a listing page with nothing ticked the loaded report is the
-// only viable source, so both stay hidden there and reappear as soon as rows
-// are selected or the tab leaves the listing.
+// actually run — that's an Octane or Spark listing with at least one row
+// selected. Anywhere else (no supported listing, or a listing with nothing
+// ticked) the loaded report is the only viable source, so both stay hidden.
+// Outside the Excel flow there's nothing to clear, so the chip stays hidden too.
 export function updateClearAffordance(listing, selectedCount) {
-  if (!isExcelFlowActive()) return;
-  setClearHintVisible(!listing || selectedCount > 0);
+  if (!isExcelFlowActive()) {
+    setClearHintVisible(false);
+    return;
+  }
+  setClearHintVisible(Boolean(listing) && selectedCount > 0);
 }
 
 function setClearHintVisible(visible) {
@@ -795,6 +1279,13 @@ function setClearHintVisible(visible) {
 // into one rAF pass stops large imports from re-scanning the whole row list
 // (and re-rendering the status text) once per row.
 let selectionCountScheduled = false;
+
+// The preview toolbar's title shows how many tickets are currently listed.
+function updatePreviewTitle() {
+  if (!previewTitle) return;
+  previewTitle.textContent = `Preview selected tickets (${state.bulkRows.length})`;
+}
+
 export function updateSelectionCount() {
   if (selectionCountScheduled) return;
   selectionCountScheduled = true;
@@ -863,6 +1354,9 @@ export function updateSelectionCount() {
         "info",
       );
     }
+    // The listing sync CTA reflects the resting state (hidden once a finished
+    // run has nothing left to sync).
+    updateListingControls();
   });
 }
 
@@ -971,6 +1465,11 @@ export function renderTicketCard(issueKey, issueUrl) {
       chrome.tabs.create({ url: issueUrl });
     });
   });
+
+  // The card is now on screen — if this ticket is fully synced the CTA has
+  // nothing left to do, so let the include-sync state re-evaluate and hide it.
+  ticketCardShown = true;
+  updateAttachmentIncludeSyncState();
 }
 
 export function showLoginButton(url) {
@@ -1153,6 +1652,7 @@ export function addBulkRow(record, site = "Octane") {
   previewSection.style.display = "block";
   setBulkPreviewCollapsed(false);
   selectAllLabel?.classList.toggle("hidden", bulkBusy);
+  updatePreviewTitle();
   updateSelectionCount();
   scheduleClampUpdate();
 
@@ -1175,6 +1675,7 @@ export function loadBulkRows(rows, site = "Octane") {
   previewSection.style.display = "block";
   setBulkPreviewCollapsed(false);
   selectAllLabel?.classList.toggle("hidden", bulkBusy);
+  updatePreviewTitle();
   updateSelectionCount();
   scheduleClampUpdate();
 

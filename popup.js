@@ -28,6 +28,11 @@ import {
   setAttachmentPickerLoading,
   clearAttachmentPicker,
   renderAttachmentPicker,
+  setAttachmentSyncProgress,
+  markAttachmentsSynced,
+  setSyncedTicketFound,
+  resetTicketCard,
+  attachmentPickerTitle,
   attachmentGroups,
   attachmentSelectAll,
   includeAttachmentsInput,
@@ -43,7 +48,10 @@ import {
   setBulkAttachmentPickerLoading,
   clearBulkAttachmentPicker,
   renderBulkAttachmentPicker,
+  bulkAttachmentPickerTitle,
   setBulkAttachmentNote,
+  setBulkAttachmentSyncProgress,
+  markBulkRowsFullySynced,
   isExcelFlowActive,
   applyListingState,
   getListingHasSelection,
@@ -59,6 +67,8 @@ import {
   scrapeSelectedListingInTab,
   scrapeSelectedSparkListingInTab,
   detectTabState,
+  scrapeTab,
+  getCurrentTab,
 } from "./components/scrape.js";
 import { startGapArt } from "./components/gap-art.js";
 import { handleFileSelected, downloadPreviewReport } from "./components/excel.js";
@@ -69,7 +79,12 @@ import {
   validateJiraBaseUrlField,
   debouncedValidateBulkProjectKey,
   extractJiraIssueDetailsFromBaseUrl,
+  getJiraContext,
 } from "./components/validation.js";
+import {
+  findExistingJiraIssue,
+  listIssueAttachments,
+} from "./components/api.js";
 import { createTicket } from "./components/single-ticket.js";
 import {
   runBulkImport,
@@ -201,21 +216,51 @@ includeAttachmentsInput.addEventListener("change", async () => {
       ? `${skipped} file(s) over 25 MB skipped — add them from the Jira UI.`
       : "";
 
-    if (!listable.length) {
-      attachmentGroups.innerHTML =
-        '<div class="attachment-group-title">No attachments found.</div>';
-      setAttachmentNote(note);
-      smoothScrollToBottom();
-      return;
+    // Check which of these attachments already live on Jira so the picker can
+    // gray them out instead of re-uploading on the next sync. Finding the
+    // ticket also lets the UI declare "nothing left to sync" when every file
+    // is already uploaded — the Create/Sync CTA then hides.
+    let syncedNames = new Set();
+    let foundTicket = false;
+    const ctx = getJiraContext();
+    if (ctx) {
+      const currentTab = await getCurrentTab();
+      const pageData = await scrapeTab(currentTab.id, getSourceSite(), {
+        includeAttachments: false,
+        captureAttachments: false,
+        captureEmbeddedImages: false,
+      }).catch(() => null);
+      if (pageData?.title) {
+        const found = await findExistingJiraIssue(
+          ctx.jiraOrigin,
+          ctx.projectKey,
+          pageData.title,
+        );
+        if (found.issue) {
+          foundTicket = true;
+          syncedNames = new Set(
+            await listIssueAttachments(ctx.jiraOrigin, found.issue.key),
+          );
+        }
+      }
     }
-    renderAttachmentPicker(listable);
+    setSyncedTicketFound(foundTicket);
+    if (!getIncludeAttachments()) return; // toggled off while handshaking
+
+    renderAttachmentPicker(listable, syncedNames);
     setAttachmentNote(note);
     smoothScrollToBottom();
   } catch (err) {
     console.error(err);
+    setSyncedTicketFound(false);
     attachmentGroups.innerHTML =
       '<div class="attachment-group-title">Couldn’t list attachments.</div>';
+    if (attachmentPickerTitle) {
+      attachmentPickerTitle.textContent = "Choose attachments to upload (0)";
+    }
     smoothScrollToBottom();
+  } finally {
+    setAttachmentSyncProgress(false);
   }
 });
 
@@ -224,10 +269,13 @@ attachmentSelectAll.addEventListener("change", () => {
     ".attachment-item input[type='checkbox']",
   );
   boxes.forEach((box) => {
+    if (box.disabled) return; // already synced — stays checked, not re-synced
     box.checked = attachmentSelectAll.checked;
   });
   state.attachmentSelection = attachmentSelectAll.checked
-    ? Array.from(boxes).map((box) => box.dataset.name)
+    ? Array.from(boxes)
+        .filter((box) => !box.disabled)
+        .map((box) => box.dataset.name)
     : [];
 });
 
@@ -267,6 +315,9 @@ bulkIncludeAttachments.addEventListener("change", async () => {
       );
       bulkAttachmentGroups.innerHTML =
         '<div class="attachment-group-title">No rows selected on the listing page.</div>';
+      if (bulkAttachmentPickerTitle) {
+        bulkAttachmentPickerTitle.textContent = "Choose attachments to upload (0)";
+      }
       smoothScrollToBottom();
       return;
     }
@@ -299,17 +350,88 @@ bulkIncludeAttachments.addEventListener("change", async () => {
       ? `${skipped} file(s) over 25 MB skipped — add them from the Jira UI.`
       : "";
 
-    renderBulkAttachmentPicker(groups, labels);
+    // Check which of these attachments already live on Jira so the picker can
+    // gray them out instead of re-uploading on the next sync.
+    const syncedMap = await buildBulkSyncedMap(items, site);
+    if (!getBulkIncludeAttachments()) return; // toggled off while handshaking
+
+    renderBulkAttachmentPicker(groups, labels, syncedMap);
     setBulkAttachmentNote(note);
+    markBulkRowsFullySynced(fullySyncedIds(groups, syncedMap));
+    // On import the popup handshakes with Jira for the selected tickets and
+    // uploads only the files that aren't attached yet — already-synced files
+    // are skipped rather than re-uploaded.
+    setStatus(
+      "Attachments are checked against Jira during import — files already attached to existing tickets are skipped.",
+      "info",
+    );
     smoothScrollToBottom();
   } catch (err) {
     console.error(err);
     setStatus("Couldn't list attachments for the selected rows.", "error");
     bulkAttachmentGroups.innerHTML =
       '<div class="attachment-group-title">Couldn’t list attachments.</div>';
+    if (bulkAttachmentPickerTitle) {
+      bulkAttachmentPickerTitle.textContent = "Choose attachments to upload (0)";
+    }
     smoothScrollToBottom();
+  } finally {
+    setBulkAttachmentSyncProgress(false);
   }
 });
+
+// Best-effort handshake with Jira before the picker renders: for each selected
+// listing row, resolve the existing ticket (if any) and list which attachment
+// names it already has. Returns { [item id]: Set<filename> } — an entry (even
+// an empty set) means the ticket already exists on Jira.
+async function buildBulkSyncedMap(items, site) {
+  const ctx = getJiraContext();
+  if (!ctx || !items.length) return {};
+  const { jiraOrigin, projectKey } = ctx;
+  const synced = {};
+  let next = 0;
+  const MAX_CONCURRENCY = 4;
+  const worker = async () => {
+    while (next < items.length) {
+      const item = items[next++];
+      try {
+        // Spark searches the issue title, which always starts with the INC
+        // number, so any prefixed form containing it resolves the ticket;
+        // Octane tickets use the item name as the summary.
+        const title =
+          site === "Spark"
+            ? `SPARK | ${item.number || item.id} | ${item.name || ""}`
+            : item.name || "";
+        if (!title) continue;
+        const found = await findExistingJiraIssue(jiraOrigin, projectKey, title);
+        if (!found.issue) continue;
+        const names = await listIssueAttachments(jiraOrigin, found.issue.key);
+        synced[String(item.id)] = new Set(names);
+      } catch {
+        // Best-effort — a failure just leaves that ticket unmarked, and the
+        // import's own per-ticket handshake still dedupes by filename.
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(MAX_CONCURRENCY, items.length) }, worker),
+  );
+  return synced;
+}
+
+// A ticket is fully synced when it already exists and every included
+// attachment is already on Jira — those preview rows can be disabled.
+function fullySyncedIds(groups, syncedMap) {
+  return new Set(
+    groups
+      .filter((group) => {
+        const files = group.attachments || [];
+        const set = syncedMap[String(group.id)];
+        return set && files.length > 0 && files.every((f) => set.has(f.name));
+      })
+      .map((group) => group.id),
+  );
+}
 
 bulkAttachmentSelectAll.addEventListener("change", () => {
   const checked = bulkAttachmentSelectAll.checked;
@@ -317,11 +439,23 @@ bulkAttachmentSelectAll.addEventListener("change", () => {
   bulkAttachmentGroups
     .querySelectorAll(".attachment-item input[type='checkbox']")
     .forEach((box) => {
+      if (box.disabled) return; // already synced — stays checked, not re-synced
       box.checked = checked;
       if (!sel[box.dataset.ticket]) sel[box.dataset.ticket] = [];
       if (checked) sel[box.dataset.ticket].push(box.dataset.name);
     });
   state.bulkAttachmentSelection = sel;
+  // Keep the per-ticket select-all boxes in step with the global one.
+  bulkAttachmentGroups
+    .querySelectorAll(".attachment-group-check")
+    .forEach((groupCheck) => {
+      const boxes = groupCheck.closest(".attachment-group").querySelectorAll(
+        ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
+      );
+      let checkedCount = 0;
+      for (const box of boxes) if (box.checked) checkedCount++;
+      groupCheck.checked = checkedCount > 0 && checkedCount === boxes.length;
+    });
 });
 
 // Lets the user stop an in-flight bulk import. Picked up by the worker
@@ -356,6 +490,14 @@ sourceSiteLabels.forEach((label) =>
 // section is hidden entirely. The listing CTA only shows when the tab is a
 // supported listing grid, and its label is tailored to the site detected.
 async function applyDetectedState() {
+  // A navigation/activation means a possibly different source ticket — drop
+  // any "already fully synced" verdict from the previous one so the
+  // Create/Sync CTA (and include toggle) return for the new ticket. The ticket
+  // card from the previous ticket is cleared too, so a stale card can't count
+  // as "already returned" for the new one.
+  setSyncedTicketFound(false);
+  resetTicketCard();
+
   let site = null;
   let listing = null;
   let selectedCount = 0;
@@ -384,7 +526,14 @@ async function applyDetectedState() {
   // "Include attachments" section + "Sync selected … listing" CTA (the latter
   // two only when rows are ticked — otherwise the Excel flow is the only path).
   applyListingState(listing, selectedCount);
-  if (!bulkView.hidden) updateBulkStatusMessage();
+  if (!bulkView.hidden) {
+    updateBulkStatusMessage();
+  } else {
+    // A navigation/activation also restores the single view's idle prompt so
+    // a previous "Ticket fully synced!" verdict doesn't linger for the new
+    // ticket that just loaded.
+    refreshSingleViewStatus();
+  }
 }
 
 applyDetectedState().then(equalizeInitialViewHeights);

@@ -23,6 +23,7 @@ import {
   frameBulkView,
   getBulkIncludeAttachments,
   getBulkSelectedAttachments,
+  markBulkAttachmentsSynced,
 } from "./ui.js";
 import { getJiraContext } from "./validation.js";
 import { saveSettings, saveProjectHistory } from "./storage.js";
@@ -360,6 +361,8 @@ export async function runListingImport(site) {
       }
     }
 
+    const uploadedAttachments = {};
+
     const { counters, completed } = await runBulkWorkerPool(
       items.length,
       async (index, counters, progress) => {
@@ -438,10 +441,15 @@ export async function runListingImport(site) {
                 existing.issue.key,
                 detail.images,
               );
+              if (syncReport.uploadedNames?.length) {
+                uploadedAttachments[String(items[index].id)] = (
+                  uploadedAttachments[String(items[index].id)] || []
+                ).concat(syncReport.uploadedNames);
+              }
               if (syncReport.failed > 0) {
                 statusHtml = `Already exists — ${existsLink} — ${syncReport.failed} attachment(s) failed to sync${failedAttachmentNames(syncReport.failedNames)}`;
-              } else if (syncReport.skipped < detail.images.length) {
-                statusHtml = `Already exists — ${existsLink} — synced missing attachments`;
+              } else if (syncReport.uploaded > 0) {
+                statusHtml = `Already exists — ${existsLink} — synced ${syncReport.uploaded} missing attachment(s)`;
               } else {
                 statusHtml = `Already exists — ${existsLink} — attachments up to date`;
               }
@@ -491,6 +499,11 @@ export async function runListingImport(site) {
               attachFailed = attachReport.failed;
               attachNames = attachReport.failedNames || [];
               attachDescriptionError = attachReport.descriptionError || "";
+              if (attachReport.uploadedNames?.length) {
+                uploadedAttachments[String(items[index].id)] = (
+                  uploadedAttachments[String(items[index].id)] || []
+                ).concat(attachReport.uploadedNames);
+              }
             }
 
             const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
@@ -527,6 +540,11 @@ export async function runListingImport(site) {
       completed,
       doneMessage: (_selectableRemain, c) => `Done. ${bulkCountsSummary(c)}`,
     });
+
+    // The attachments the run actually uploaded to Jira are now synced —
+    // mark them checked + disabled in the open picker so a re-run doesn't
+    // re-upload them.
+    markBulkAttachmentsSynced(uploadedAttachments);
   } finally {
     abortImportBtn.style.display = "none";
     setBulkBusy(false);

@@ -75,15 +75,15 @@
       <label class="attach-toggle" for="includeAttachments">
         <input id="includeAttachments" type="checkbox" />
         <span class="attach-toggle-label">
-          <svg class="field-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m20.5 15.5-6.5 6.5a4.7 4.7 0 0 1-6.6 0L3.6 18.2a4.7 4.7 0 0 1 0-6.6l6.5-6.5a3.6 3.6 0 0 1 5 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m3.5 8.5 6.5-6.5a4.7 4.7 0 0 1 6.6 0l6.4 6.4a4.7 4.7 0 0 1 0 6.6l-6.5 6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           Include attachments
         </span>
+        <span id="attachmentSyncProgress" class="attach-progress" hidden></span>
       </label>
       <div id="attachmentPicker" class="attachment-picker" hidden>
         <div class="attachment-picker-header">
           <button type="button" class="attachment-picker-collapse" aria-expanded="true">
             <svg class="attachment-picker-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span class="attachment-picker-title">Choose attachments to upload</span>
+            <span id="attachmentPickerTitle" class="attachment-picker-title">Choose attachments to upload</span>
           </button>
           <label class="attachment-picker-toggle" for="attachmentSelectAll">
             <input id="attachmentSelectAll" type="checkbox" checked />
@@ -164,15 +164,15 @@
       <label class="attach-toggle" for="bulkIncludeAttachments">
         <input id="bulkIncludeAttachments" type="checkbox" />
         <span class="attach-toggle-label">
-          <svg class="field-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m20.5 15.5-6.5 6.5a4.7 4.7 0 0 1-6.6 0L3.6 18.2a4.7 4.7 0 0 1 0-6.6l6.5-6.5a3.6 3.6 0 0 1 5 0" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="m3.5 8.5 6.5-6.5a4.7 4.7 0 0 1 6.6 0l6.4 6.4a4.7 4.7 0 0 1 0 6.6l-6.5 6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
           Include attachments
         </span>
+        <span id="bulkAttachmentSyncProgress" class="attach-progress" hidden></span>
       </label>
       <div id="bulkAttachmentPicker" class="attachment-picker" hidden>
         <div class="attachment-picker-header">
           <button type="button" class="attachment-picker-collapse" aria-expanded="true">
             <svg class="attachment-picker-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span class="attachment-picker-title">Choose attachments to upload</span>
+            <span id="bulkAttachmentPickerTitle" class="attachment-picker-title">Choose attachments to upload</span>
           </button>
           <label class="attachment-picker-toggle" for="bulkAttachmentSelectAll">
             <input id="bulkAttachmentSelectAll" type="checkbox" checked />
@@ -193,7 +193,7 @@
           aria-expanded="true"
         >
           <svg class="attachment-picker-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <span class="attachment-picker-title">Preview selected tickets</span>
+          <span id="previewTitle" class="attachment-picker-title">Preview selected tickets</span>
         </button>
         <div class="preview-toolbar-right">
           <span id="selectionCount" class="selection-count"></span>

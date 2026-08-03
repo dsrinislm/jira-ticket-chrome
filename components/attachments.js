@@ -158,27 +158,37 @@ export async function attachImagesToIssue(jiraOrigin, issueKey, images, descript
     console.error("Description embed failed:", err);
   }
 
+  const failedPlaces = new Set(failedImages.map((img) => img.placeholder));
   return {
     failed,
     firstError,
     failedNames: failedImages.map((img) => imageUploadFilename(img)),
+    uploadedNames: images
+      .filter((img) => img.name && !failedPlaces.has(img.placeholder))
+      .map((img) => imageUploadFilename(img)),
     cancelled,
     descriptionError,
   };
 }
 
-// Retries the attachments of an already-created ticket: uploads only the
-// images whose filename isn't already attached to the issue, so a retry
-// never duplicates the uploads that already succeeded. The description is
-// left untouched — it was finalized when the ticket was first created.
+// Retries the attachments of an already-created ticket: handshakes with Jira
+// (list the issue's current attachments), then uploads only the selected
+// files whose name isn't already attached — so a retry never duplicates what
+// already synced. Only real attachment files are considered: embedded
+// description images carry no `name` (they were already embedded into the
+// ticket's description when it was created, and their synthetic
+// `__JIRA_IMG_n__` names never match Jira's stored ones), so they're never
+// re-uploaded as bare attachments. The description is left untouched — it was
+// finalized when the ticket was first created.
 export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onProgress) {
   const existing = new Set(await listIssueAttachments(jiraOrigin, issueKey));
-  const missing = images.filter(
+  const files = images.filter((img) => img.name);
+  const missing = files.filter(
     (img) => !existing.has(imageUploadFilename(img)),
   );
 
   if (!missing.length) {
-    return { failed: 0, firstError: "", skipped: images.length };
+    return { failed: 0, firstError: "", uploaded: 0, uploadedNames: [], skipped: files.length };
   }
 
   const { failed, firstError, failedImages, cancelled } = await uploadImages(
@@ -187,10 +197,15 @@ export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onP
     missing,
     onProgress,
   );
+  const failedPlaces = new Set(failedImages.map((img) => img.placeholder));
   return {
     failed,
     firstError,
-    skipped: images.length - missing.length,
+    uploaded: missing.length - failed,
+    uploadedNames: missing
+      .filter((img) => !failedPlaces.has(img.placeholder))
+      .map((img) => imageUploadFilename(img)),
+    skipped: files.length - missing.length,
     failedNames: failedImages.map((img) => imageUploadFilename(img)),
     cancelled,
   };
