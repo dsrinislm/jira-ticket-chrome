@@ -24,6 +24,11 @@ import {
   getBulkIncludeAttachments,
   getBulkSelectedAttachments,
   markBulkAttachmentsSynced,
+  setupBulkMediaProgress,
+  startBulkMediaProgress,
+  updateBulkMediaProgress,
+  setBulkMediaProgressDone,
+  hideBulkMediaProgress,
 } from "./ui.js";
 import { getJiraContext } from "./validation.js";
 import { saveSettings, saveProjectHistory } from "./storage.js";
@@ -63,23 +68,18 @@ function bulkCountsSummary({ created, skipped, failed }) {
   return `${created} created, ${skipped} already existed, ${failed} failed.`;
 }
 
-// Shared bulk-import pacing: a bounded worker pool over `total` items that
-// updates the progress bar and paces each worker. `runItem(index, counters,
-// progress)` mutates `counters` ({ created, skipped, failed }) and may read
-// `progress.completed` for status text; the pool owns the progress bar and
-// the per-item sleep so both flows stay consistent. Sequential imports take
-// ~2 API calls + 250ms per row, so N rows cost ~2N serial round trips — a
-// small pool keeps that pacing (and Jira's rate limits) intact while cutting
-// wall time by roughly the pool size.
+// Shared bulk-import pacing: processes items strictly one at a time so each
+// ticket's attachment upload can be watched in real time (and Jira's rate
+// limits stay intact). `runItem(index, counters, progress)` mutates
+// `counters` ({ created, skipped, failed }) and may read `progress.completed`
+// for status text; the caller owns the progress bar updates and the per-item
+// sleep. Sequential imports take ~2 API calls + 250ms per row.
 async function runBulkWorkerPool(total, runItem) {
   const counters = { created: 0, skipped: 0, failed: 0 };
   const progress = { completed: 0 };
-  const MAX_CONCURRENT = 4;
-  let next = 0;
 
   const worker = async () => {
-    while (next < total && !abortRequested) {
-      const index = next++;
+    for (let index = 0; index < total && !abortRequested; index++) {
       await runItem(index, counters, progress);
       progress.completed++;
       updateProgress(progress.completed, total);
@@ -87,9 +87,7 @@ async function runBulkWorkerPool(total, runItem) {
     }
   };
 
-  await Promise.all(
-    Array.from({ length: Math.min(MAX_CONCURRENT, total) }, worker),
-  );
+  await worker();
 
   return { counters, completed: progress.completed };
 }
@@ -151,6 +149,9 @@ export async function runBulkImport() {
   // Report-driven flow — the "Create selected tickets" CTA applies here, so
   // drop any listing-flow state left over from a previous run.
   setBulkRowsFromListing(false);
+  // Report rows carry no attachments, so there's nothing to show in the
+  // per-ticket media progress — clear any rows a listing run left behind.
+  hideBulkMediaProgress();
 
   const selectedRows = state.bulkRows.filter(
     (r) => r.checkbox.checked && !r.checkbox.disabled,
@@ -363,6 +364,19 @@ export async function runListingImport(site) {
 
     const uploadedAttachments = {};
 
+    // Tickets that will actually upload media (their detail has images) get a
+    // per-ticket progress row; the rest are skipped. Each item index maps to
+    // its row so a worker can update its own ticket's upload in real time.
+    const mediaRowByItemIndex = new Map();
+    const mediaLabels = [];
+    items.forEach((item, index) => {
+      if (!details[index]?.images?.length) return;
+      mediaRowByItemIndex.set(index, mediaLabels.length);
+      const idText = flowSite === "Spark" ? item.number || item.id : item.id;
+      mediaLabels.push(item.name ? `${idText} · ${item.name}` : idText);
+    });
+    setupBulkMediaProgress(mediaLabels);
+
     const { counters, completed } = await runBulkWorkerPool(
       items.length,
       async (index, counters, progress) => {
@@ -435,11 +449,17 @@ export async function runListingImport(site) {
           // details fetch), mirroring the single-ticket sync. Skipped count
           // stays "already existed" — the row was still a duplicate.
           if (getBulkIncludeAttachments() && detail?.images?.length) {
+            const mediaRow = mediaRowByItemIndex.get(index);
+            if (mediaRow !== undefined) startBulkMediaProgress(mediaRow);
             try {
               const syncReport = await uploadMissingAttachments(
                 jiraOrigin,
                 existing.issue.key,
                 detail.images,
+                mediaRow !== undefined
+                  ? (loaded, total) =>
+                      updateBulkMediaProgress(mediaRow, loaded, total)
+                  : undefined,
               );
               if (syncReport.uploadedNames?.length) {
                 uploadedAttachments[String(items[index].id)] = (
@@ -457,6 +477,9 @@ export async function runListingImport(site) {
               console.error("Bulk resync failed for", items[index].id, err);
               statusHtml = `Already exists — ${existsLink} — couldn't sync attachments`;
             }
+            // Whether files synced, were already up to date, or failed, this
+            // ticket's media row is finished.
+            if (mediaRow !== undefined) setBulkMediaProgressDone(mediaRow);
           }
 
           setRowStatus(row, "exists", statusHtml);
@@ -490,12 +513,19 @@ export async function runListingImport(site) {
             let attachNames = [];
             let attachDescriptionError = "";
             if (detail.images?.length) {
+              const mediaRow = mediaRowByItemIndex.get(index);
+              if (mediaRow !== undefined) startBulkMediaProgress(mediaRow);
               const attachReport = await attachImagesToIssue(
                 jiraOrigin,
                 issue.key,
                 detail.images,
                 issueDescription,
+                mediaRow !== undefined
+                  ? (loaded, total) =>
+                      updateBulkMediaProgress(mediaRow, loaded, total)
+                  : undefined,
               );
+              if (mediaRow !== undefined) setBulkMediaProgressDone(mediaRow);
               attachFailed = attachReport.failed;
               attachNames = attachReport.failedNames || [];
               attachDescriptionError = attachReport.descriptionError || "";

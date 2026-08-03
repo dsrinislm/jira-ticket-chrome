@@ -4,7 +4,6 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-
   <title>Jos - Tri Connect Hub</title>
 
   <link rel="stylesheet" href="popup.css" />
@@ -13,7 +12,7 @@
 <body>
   <header class="app-header">
     <div class="mark" aria-hidden="true">
-      <img src="./icons/icon128.ico" alt="" />
+      <img src="./icons/icon128.png" alt="" />
     </div>
     <div class="header-text">
       <p class="eyebrow">Octane Site&nbsp;→&nbsp;Jira</p>
@@ -229,6 +228,15 @@
         <div class="progress-track">
           <div id="progressBar" class="progress-bar"></div>
         </div>
+      </div>
+
+      <div id="bulkMediaProgress" class="bulk-media-progress" style="display: none;" data-collapsed="true">
+        <button id="bulkMediaToggle" type="button" class="bulk-media-progress-head bulk-media-progress-toggle" aria-expanded="false">
+          <svg class="bulk-media-caret" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span class="bulk-media-progress-title">Media uploads</span>
+          <span id="bulkMediaProgressCount" class="bulk-media-progress-count"></span>
+        </button>
+        <div id="bulkMediaProgressList" class="bulk-media-progress-list"></div>
       </div>
 
       <div class="button-group">

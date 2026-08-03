@@ -900,6 +900,17 @@ export const progressLabel = el("progressLabel");
 export const progressPercent = el("progressPercent");
 export const progressBar = el("progressBar");
 export const abortImportBtn = el("abortImportBtn");
+export const bulkMediaProgress = el("bulkMediaProgress");
+export const bulkMediaToggle = el("bulkMediaToggle");
+export const bulkMediaProgressList = el("bulkMediaProgressList");
+export const bulkMediaProgressCount = el("bulkMediaProgressCount");
+
+// Collapse/expand for the per-ticket media panel. Collapsed keeps only the
+// active ticket's row visible (see refreshBulkMediaRowVisibility), trimming
+// the panel to a single element; the user's choice survives across runs.
+bulkMediaToggle?.addEventListener("click", () => {
+  setBulkMediaCollapsed(bulkMediaProgress?.dataset.collapsed !== "true");
+});
 
 export const syncProgressSection = el("syncProgressSection");
 export const syncProgressLabel = el("syncProgressLabel");
@@ -1236,6 +1247,7 @@ export function clearFileUpload() {
   if (previewSection) previewSection.style.display = "none";
   if (previewTitle) previewTitle.textContent = "Preview selected tickets";
   if (progressSection) progressSection.style.display = "none";
+  hideBulkMediaProgress();
   if (exportBtn) exportBtn.style.display = "none";
   if (fileError) fileError.style.display = "none";
   if (fileSummary) fileSummary.textContent = "";
@@ -1420,6 +1432,128 @@ export function updateProgress(completed, total, label) {
   progressPercent.textContent = `${pct}%`;
   progressSection.setAttribute("aria-valuenow", String(pct));
   progressLabel.textContent = label || `Importing ${completed} of ${total}…`;
+}
+
+// --- Bulk per-ticket media upload progress ---------------------------------
+// One row per ticket that has attachments to upload; tickets are processed one
+// at a time, so the current row animates in real time while the rest wait.
+
+// Collapsed mode keeps exactly one row visible — the ticket currently
+// uploading (or the next one up, then the last one finished) — so the panel
+// stays one element tall while a run is in progress. Expanded shows every row.
+export function setBulkMediaCollapsed(collapsed) {
+  if (!bulkMediaProgress) return;
+  bulkMediaProgress.dataset.collapsed = collapsed ? "true" : "false";
+  bulkMediaToggle?.setAttribute("aria-expanded", String(!collapsed));
+  refreshBulkMediaRowVisibility();
+}
+
+function refreshBulkMediaRowVisibility() {
+  if (!bulkMediaProgressList) return;
+  const collapsed = bulkMediaProgress?.dataset.collapsed === "true";
+  const rows = [...bulkMediaProgressList.children];
+  if (!collapsed) {
+    rows.forEach((r) => (r.style.display = ""));
+    return;
+  }
+  const active =
+    rows.find((r) => r.dataset.state === "uploading") ||
+    rows.find((r) => r.dataset.state === "pending") ||
+    rows[rows.length - 1];
+  rows.forEach((r) => (r.style.display = r === active ? "" : "none"));
+}
+
+// Renders a row per label (the ticket's short id) and shows the section.
+// An empty list hides the section — used when a run has no media to upload.
+export function setupBulkMediaProgress(labels) {
+  if (!bulkMediaProgressList) return;
+  bulkMediaProgressList.innerHTML = "";
+  labels.forEach((label) => {
+    const row = document.createElement("div");
+    row.className = "bulk-media-row";
+    row.dataset.state = "pending";
+
+    const head = document.createElement("div");
+    head.className = "bulk-media-row-head";
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "bulk-media-row-label";
+    labelEl.textContent = label;
+
+    const pctEl = document.createElement("span");
+    pctEl.className = "bulk-media-row-pct";
+    pctEl.textContent = "0%";
+
+    head.append(labelEl, pctEl);
+
+    const track = document.createElement("div");
+    track.className = "bulk-media-row-track";
+    const bar = document.createElement("div");
+    bar.className = "bulk-media-row-bar";
+    track.appendChild(bar);
+
+    row.append(head, track);
+    bulkMediaProgressList.appendChild(row);
+  });
+  if (bulkMediaProgress) bulkMediaProgress.style.display = labels.length ? "block" : "none";
+  if (bulkMediaProgressCount) {
+    bulkMediaProgressCount.textContent = labels.length
+      ? `${labels.length} ticket(s) with media`
+      : "";
+  }
+  refreshBulkMediaRowVisibility();
+}
+
+// Marks a row as the one currently uploading (resetting its bar to 0) and
+// brings it into view — in expanded mode the list may be scrolled past it, so
+// the active ticket stays on screen as it uploads.
+export function startBulkMediaProgress(rowIndex) {
+  const row = bulkMediaProgressList?.children[rowIndex];
+  if (!row) return;
+  row.dataset.state = "uploading";
+  const bar = row.querySelector(".bulk-media-row-bar");
+  if (bar) bar.style.width = "0%";
+  const pctEl = row.querySelector(".bulk-media-row-pct");
+  if (pctEl) pctEl.textContent = "0%";
+  row.scrollIntoView({ block: "nearest" });
+  refreshBulkMediaRowVisibility();
+}
+
+// Real-time byte progress for a ticket's upload. `loaded`/`total` are bytes;
+// an optional `label` overrides the default "formatted / formatted" bytes text.
+export function updateBulkMediaProgress(rowIndex, loaded, total, label) {
+  const row = bulkMediaProgressList?.children[rowIndex];
+  if (!row) return;
+  row.dataset.state = "uploading";
+  const pct = total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 100;
+  const bar = row.querySelector(".bulk-media-row-bar");
+  if (bar) bar.style.width = `${pct}%`;
+  const pctEl = row.querySelector(".bulk-media-row-pct");
+  if (pctEl) {
+    const bytesText =
+      total > 0
+        ? `${formatBytes(loaded) || "0 B"} / ${formatBytes(total) || "0 B"}`
+        : `${pct}%`;
+    pctEl.textContent = label || bytesText;
+  }
+  if (total > 0 && loaded >= total) setBulkMediaProgressDone(rowIndex);
+}
+
+// Marks a ticket's media upload as finished (100%, green).
+export function setBulkMediaProgressDone(rowIndex) {
+  const row = bulkMediaProgressList?.children[rowIndex];
+  if (!row) return;
+  row.dataset.state = "done";
+  const bar = row.querySelector(".bulk-media-row-bar");
+  if (bar) bar.style.width = "100%";
+  const pctEl = row.querySelector(".bulk-media-row-pct");
+  if (pctEl) pctEl.textContent = "100%";
+  refreshBulkMediaRowVisibility();
+}
+
+export function hideBulkMediaProgress() {
+  if (bulkMediaProgress) bulkMediaProgress.style.display = "none";
+  if (bulkMediaProgressList) bulkMediaProgressList.innerHTML = "";
 }
 
 // Byte-level upload progress for the single-ticket flow (bulk flows track row
