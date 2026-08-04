@@ -1,5 +1,5 @@
 {
-  "name": "jira-ticket-chrome",
+  "name": "joshub-chrome-extension",
   "version": "1.0.0",
   "private": true,
   "type": "module",

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Tri Connect Hub",
+  "name": "JosHub | Tri Connect | Issues Synchronizer",
   "version": "1.0",
-  "description": "Jos - Connect Hub",
+  "description": "Minimalistic Chrome extension to synchronize issues between Jira Octane and Spark.",
   "permissions": [
     "activeTab",
     "storage",
