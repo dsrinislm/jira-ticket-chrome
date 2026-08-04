@@ -84,3 +84,9 @@ That's it — you're ready to create and sync tickets.
 ## Support
 
 This is an internal productivity tool. For questions or issues, reach out to your team's extension owner or the Jira/QA administration contact.
+
+---
+
+## Author
+
+Srinivasan Dhanapal <dsrinislm@gmail.com>

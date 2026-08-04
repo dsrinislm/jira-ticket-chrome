@@ -2,6 +2,7 @@
   "name": "joshub-chrome-extension",
   "version": "1.0.0",
   "private": true,
+  "author": "Srinivasan Dhanapal",
   "type": "module",
   "scripts": {
     "lint": "eslint components popup.js",
