@@ -231,11 +231,13 @@
       </div>
 
       <div id="bulkMediaProgress" class="bulk-media-progress" style="display: none;" data-collapsed="true">
-        <button id="bulkMediaToggle" type="button" class="bulk-media-progress-head bulk-media-progress-toggle" aria-expanded="false">
-          <svg class="bulk-media-caret" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          <span class="bulk-media-progress-title">Media uploads</span>
+        <div class="attachment-picker-header">
+          <button id="bulkMediaToggle" type="button" class="attachment-picker-collapse" aria-expanded="false">
+            <svg class="attachment-picker-chevron" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m6 9 6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="attachment-picker-title">Media uploads</span>
+          </button>
           <span id="bulkMediaProgressCount" class="bulk-media-progress-count"></span>
-        </button>
+        </div>
         <div id="bulkMediaProgressList" class="bulk-media-progress-list"></div>
       </div>
 

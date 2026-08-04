@@ -65,13 +65,16 @@ export function requestUploadCancel() {
 // Returns the uploaded attachments by placeholder plus a failure report.
 // `onProgress(uploadedBytes, totalBytes)` is called with the aggregate bytes
 // sent so far vs. the batch total, so the UI can show "uploaded / remaining".
-export async function uploadImages(jiraOrigin, issueKey, images, onProgress) {
+// `onFile(uploadedFiles, totalFiles)` is called after each file completes (and
+// once more at the end), so the UI can show a per-file count under the bar.
+export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onFile) {
   const byPlaceholder = {};
   const MAX_CONCURRENT = 4;
   let next = 0;
   let failed = 0;
   let firstError = "";
   const failedImages = [];
+  let uploadedFiles = 0;
 
   cancelRequested = false;
 
@@ -81,6 +84,12 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress) {
   const report = (loaded) => {
     if (typeof onProgress === "function") {
       onProgress(loaded ?? uploadedBytes, totalBytes);
+    }
+  };
+
+  const reportFiles = () => {
+    if (typeof onFile === "function") {
+      onFile(uploadedFiles, images.length);
     }
   };
 
@@ -106,6 +115,8 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress) {
           },
         );
         byPlaceholder[img.placeholder] = fileMediaNode(attachment);
+        uploadedFiles++;
+        reportFiles();
       } catch (err) {
         if (cancelRequested) break; // stopped by the user — not a failure
         failed++;
@@ -123,6 +134,7 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress) {
   );
 
   report();
+  reportFiles();
   return { byPlaceholder, failed, firstError, failedImages, cancelled: cancelRequested };
 }
 
@@ -130,11 +142,11 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress) {
 // in the description body for the real attachment media nodes.
 // Returns how many uploads failed (and the first error) so callers can
 // surface "image missed" instead of dropping it silently.
-export async function attachImagesToIssue(jiraOrigin, issueKey, images, description, onProgress) {
+export async function attachImagesToIssue(jiraOrigin, issueKey, images, description, onProgress, onFile) {
   setStatus("Uploading images...", "loading");
 
   const { byPlaceholder, failed, firstError, failedImages, cancelled } =
-    await uploadImages(jiraOrigin, issueKey, images, onProgress);
+    await uploadImages(jiraOrigin, issueKey, images, onProgress, onFile);
 
   // Whether stopped by the user or just partially failed, the description is
   // still finalized with whatever uploaded — insertUploadedImages drops the
@@ -180,7 +192,7 @@ export async function attachImagesToIssue(jiraOrigin, issueKey, images, descript
 // `__JIRA_IMG_n__` names never match Jira's stored ones), so they're never
 // re-uploaded as bare attachments. The description is left untouched — it was
 // finalized when the ticket was first created.
-export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onProgress) {
+export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onProgress, onFile) {
   const existing = new Set(await listIssueAttachments(jiraOrigin, issueKey));
   const files = images.filter((img) => img.name);
   const missing = files.filter(
@@ -196,6 +208,7 @@ export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onP
     issueKey,
     missing,
     onProgress,
+    onFile,
   );
   const failedPlaces = new Set(failedImages.map((img) => img.placeholder));
   return {

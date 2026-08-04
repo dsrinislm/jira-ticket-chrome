@@ -27,6 +27,7 @@ import {
   setupBulkMediaProgress,
   startBulkMediaProgress,
   updateBulkMediaProgress,
+  updateBulkMediaFiles,
   setBulkMediaProgressDone,
   hideBulkMediaProgress,
 } from "./ui.js";
@@ -36,7 +37,9 @@ import {
   scrapeSelectedListingInTab,
   scrapeSelectedSparkListingInTab,
   fetchListingDetailsInTab,
+  fetchSparkCommentsInTab,
 } from "./scrape.js";
+import { syncSparkComments } from "./comments.js";
 import { findExistingJiraIssue, createJiraIssue } from "./api.js";
 import { buildIssueDescription, sourceUrlBlock } from "./adf.js";
 import {
@@ -362,6 +365,27 @@ export async function runListingImport(site) {
       }
     }
 
+    // Spark journal entries (public comments + work notes) are fetched the
+    // same way as the details: one executeScript injection in the listing tab
+    // that runs sys_journal_field calls with 4-way concurrency, so every
+    // selected incident's comments arrive in a single batch. A failure here
+    // just means comments are skipped — tickets still get created.
+    const commentBySysId = new Map();
+    if (flowSite === "Spark") {
+      try {
+        const groups = await fetchSparkCommentsInTab(
+          items.map((i) => i.id),
+        );
+        groups.forEach((group) => {
+          if (group?.comments?.length) {
+            commentBySysId.set(String(group.id), group.comments);
+          }
+        });
+      } catch (err) {
+        console.error("Spark comments fetch failed:", err);
+      }
+    }
+
     const uploadedAttachments = {};
 
     // Tickets that will actually upload media (their detail has images) get a
@@ -460,6 +484,9 @@ export async function runListingImport(site) {
                   ? (loaded, total) =>
                       updateBulkMediaProgress(mediaRow, loaded, total)
                   : undefined,
+                mediaRow !== undefined
+                  ? (done, total) => updateBulkMediaFiles(mediaRow, done, total)
+                  : undefined,
               );
               if (syncReport.uploadedNames?.length) {
                 uploadedAttachments[String(items[index].id)] = (
@@ -480,6 +507,21 @@ export async function runListingImport(site) {
             // Whether files synced, were already up to date, or failed, this
             // ticket's media row is finished.
             if (mediaRow !== undefined) setBulkMediaProgressDone(mediaRow);
+          }
+
+          // Each Spark comment/work note becomes its own Jira comment
+          // (deduped), even on a re-run — any journal entry added since the
+          // last export is picked up.
+          const comments = commentBySysId.get(String(items[index].id));
+          if (comments?.length) {
+            const commentSync = await syncSparkComments(
+              jiraOrigin,
+              existing.issue.key,
+              comments,
+            );
+            if (commentSync.added > 0) {
+              statusHtml = `${statusHtml} — ${commentSync.added} comment(s) synced`;
+            }
           }
 
           setRowStatus(row, "exists", statusHtml);
@@ -524,6 +566,9 @@ export async function runListingImport(site) {
                   ? (loaded, total) =>
                       updateBulkMediaProgress(mediaRow, loaded, total)
                   : undefined,
+                mediaRow !== undefined
+                  ? (done, total) => updateBulkMediaFiles(mediaRow, done, total)
+                  : undefined,
               );
               if (mediaRow !== undefined) setBulkMediaProgressDone(mediaRow);
               attachFailed = attachReport.failed;
@@ -537,10 +582,23 @@ export async function runListingImport(site) {
             }
 
             const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
+
+            // Each Spark comment/work note becomes its own Jira comment
+            // (deduped against anything already on the issue).
+            const comments = commentBySysId.get(String(items[index].id));
+            let commentSync = { added: 0 };
+            if (comments?.length) {
+              commentSync = await syncSparkComments(
+                jiraOrigin,
+                issue.key,
+                comments,
+              );
+            }
+
             setRowStatus(
               row,
               "created",
-              `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>${attachFailed ? ` — ${attachFailed} attachment(s) failed to upload${failedAttachmentNames(attachNames)}` : ""}${attachDescriptionError ? " — attachments uploaded, but inline image embed failed" : ""}`,
+              `<a href="${escapeHtml(issueUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(issue.key)}</a>${attachFailed ? ` — ${attachFailed} attachment(s) failed to upload${failedAttachmentNames(attachNames)}` : ""}${attachDescriptionError ? " — attachments uploaded, but inline image embed failed" : ""}${commentSync.added ? ` — ${commentSync.added} comment(s) synced` : ""}`,
             );
             // Keep the freshest created ticket pinned to the top of the
             // preview table while the sync runs (workers finish out of order).
@@ -551,7 +609,9 @@ export async function runListingImport(site) {
                 ? `Created ${issue.key} (${attachFailed} attachment(s) failed to upload${failedAttachmentNames(attachNames)}).`
                 : attachDescriptionError
                   ? `Created ${issue.key} (attachments uploaded, but inline image embed failed).`
-                  : `Created ${issue.key}.`,
+                  : commentSync.added
+                    ? `Created ${issue.key} — ${commentSync.added} comment(s) synced.`
+                    : `Created ${issue.key}.`,
               attachFailed || attachDescriptionError ? "error" : "success",
             );
           } catch (err) {

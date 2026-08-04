@@ -17,7 +17,7 @@ import {
 import { getJiraContext } from "./validation.js";
 import { saveSettings, saveProjectHistory } from "./storage.js";
 import { formatBytes } from "./util.js";
-import { getPageData, detectSiteInTab } from "./scrape.js";
+import { getPageData, detectSiteInTab, fetchSparkCommentsInTab } from "./scrape.js";
 import {
   isJiraLoggedIn,
   validateProject,
@@ -25,6 +25,7 @@ import {
   createJiraIssue,
   listIssueAttachments,
 } from "./api.js";
+import { syncSparkComments } from "./comments.js";
 import { sourceUrlBlock } from "./adf.js";
 import {
   imageUploadFilename,
@@ -33,6 +34,21 @@ import {
   attachImagesToIssue,
   requestUploadCancel,
 } from "./attachments.js";
+
+// Fetches the open Spark incident's comments/work notes through the ServiceNow
+// API (sys_journal_field — no DOM scraping) and posts each as its own Jira
+// comment, deduped against the issue's existing comments. Spark only: Octane
+// has no journal path, and without a sys_id in the details URL there's nothing
+// to fetch. Best-effort — never throws.
+async function syncSparkCommentsForTicket(jiraOrigin, issueKey, pageData) {
+  if (getSourceSite() !== "Spark" || !issueKey || !pageData?.url) {
+    return { added: 0, total: 0 };
+  }
+  const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(pageData.url || "");
+  if (!sysIdMatch) return { added: 0, total: 0 };
+  const groups = await fetchSparkCommentsInTab([sysIdMatch[1]]).catch(() => []);
+  return syncSparkComments(jiraOrigin, issueKey, groups[0]?.comments || []);
+}
 
 // Single-ticket flow: reads the active QA ticket from the current tab,
 // creates (or syncs) its Jira ticket, and uploads the selected attachments.
@@ -127,6 +143,9 @@ export async function createTicket() {
     if (existing.issue) {
       const issueUrl = `${jiraOrigin}/browse/${existing.issue.key}`;
 
+      let finalStatus = "";
+      let finalStatusType = "success";
+
       // A previous create may have left some attachments behind (e.g. a
       // transient 401 on one upload). When the ticket already exists, sync
       // only the files the issue is actually missing: list what's already
@@ -150,10 +169,7 @@ export async function createTicket() {
         }
 
         if (!missing.length) {
-          setStatus(
-            `Ticket already exists: ${existing.issue.key}. Selected attachments up to date.`,
-            "success",
-          );
+          finalStatus = `Ticket already exists: ${existing.issue.key}. Selected attachments up to date.`;
         } else {
           setStatus(
             `Downloading ${missing.length} attachment(s)...`,
@@ -170,65 +186,62 @@ export async function createTicket() {
           }).catch(() => null);
 
           if (!captured?.images?.length) {
+            finalStatus = `Couldn't capture the missing attachments for ${existing.issue.key}.`;
+            finalStatusType = "error";
+          } else {
             setStatus(
-              `Couldn't capture the missing attachments for ${existing.issue.key}.`,
-              "error",
+              `Uploading ${missing.length} missing attachment(s) with ${existing.issue.key}...`,
+              "loading",
             );
-            renderTicketCard(existing.issue.key, issueUrl);
-            saveProjectHistory(projectKey);
-            return;
-          }
-
-          setStatus(
-            `Uploading ${missing.length} missing attachment(s) with ${existing.issue.key}...`,
-            "loading",
-          );
-          setSyncProgressVisible(true);
-          syncAbortBtn.disabled = false;
-          const attachReport = await uploadMissingAttachments(
-            jiraOrigin,
-            existing.issue.key,
-            captured.images,
-            (loaded, total) =>
-              updateSyncProgress(
-                loaded,
-                total,
-                `Uploading ${formatBytes(loaded)} of ${formatBytes(total)}…`,
-              ),
-          );
-          setSyncProgressVisible(false);
-          // The files this run actually uploaded are now synced — mark them
-          // checked + disabled in the open picker so a re-run reflects it.
-          markAttachmentsSynced(attachReport.uploadedNames);
-          if (attachReport.cancelled) {
-            setStatus(
-              `Upload stopped. ${existing.issue.key} attachments not synced.`,
-              "info",
+            setSyncProgressVisible(true);
+            syncAbortBtn.disabled = false;
+            const attachReport = await uploadMissingAttachments(
+              jiraOrigin,
+              existing.issue.key,
+              captured.images,
+              (loaded, total) =>
+                updateSyncProgress(
+                  loaded,
+                  total,
+                  `Uploading ${formatBytes(loaded)} of ${formatBytes(total)}…`,
+                ),
             );
-            renderTicketCard(existing.issue.key, issueUrl);
-            saveProjectHistory(projectKey);
-            return;
+            setSyncProgressVisible(false);
+            // The files this run actually uploaded are now synced — mark
+            // them checked + disabled in the open picker so a re-run
+            // reflects it.
+            markAttachmentsSynced(attachReport.uploadedNames);
+            if (attachReport.cancelled) {
+              finalStatus = `Upload stopped. ${existing.issue.key} attachments not synced.`;
+              finalStatusType = "info";
+            } else if (attachReport.failed > 0) {
+              finalStatus = `${attachReport.failed} attachment(s) still failed to upload${failedAttachmentNames(attachReport.failedNames)} (${attachReport.firstError}).`;
+              finalStatusType = "error";
+            } else {
+              finalStatus =
+                attachReport.uploaded > 0
+                  ? `Ticket already exists: ${existing.issue.key}. ${attachReport.uploaded} missing attachment(s) uploaded.`
+                  : `Ticket already exists: ${existing.issue.key}. Selected attachments up to date.`;
+            }
           }
-          if (attachReport.failed > 0) {
-            setStatus(
-              `${attachReport.failed} attachment(s) still failed to upload${failedAttachmentNames(attachReport.failedNames)} (${attachReport.firstError}).`,
-              "error",
-            );
-            renderTicketCard(existing.issue.key, issueUrl);
-            saveProjectHistory(projectKey);
-            return;
-          }
-          setStatus(
-            attachReport.uploaded > 0
-              ? `Ticket already exists: ${existing.issue.key}. ${attachReport.uploaded} missing attachment(s) uploaded.`
-              : `Ticket already exists: ${existing.issue.key}. Selected attachments up to date.`,
-            "success",
-          );
         }
       } else {
-        setStatus(`Ticket already exists: ${existing.issue.key}`, "success");
+        finalStatus = `Ticket already exists: ${existing.issue.key}`;
       }
 
+      // Each Spark comment/work note becomes its own Jira comment (deduped),
+      // whether this run created anything or not — a resync picks up any
+      // journal entries added since the last export.
+      const commentSync = await syncSparkCommentsForTicket(
+        jiraOrigin,
+        existing.issue.key,
+        pageData,
+      );
+      if (commentSync.added > 0) {
+        finalStatus = `${finalStatus} ${commentSync.added} comment(s) synced.`;
+      }
+
+      setStatus(finalStatus, finalStatusType);
       renderTicketCard(existing.issue.key, issueUrl);
       saveProjectHistory(projectKey);
       return;
@@ -296,23 +309,33 @@ export async function createTicket() {
     markAttachmentsSynced(attachReport.uploadedNames);
 
     const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
+
+    // Each Spark comment/work note becomes its own Jira comment (deduped).
+    const commentSync = await syncSparkCommentsForTicket(
+      jiraOrigin,
+      issue.key,
+      capturedData,
+    );
+    const commentSuffix =
+      commentSync.added > 0 ? ` ${commentSync.added} comment(s) synced.` : "";
+
     if (attachReport.cancelled) {
       setStatus(
-        `Created ${issue.key}, but attachment upload was stopped.`,
+        `Created ${issue.key}, but attachment upload was stopped.${commentSuffix}`,
         "info",
       );
     } else if (attachReport.failed > 0) {
       setStatus(
-        `Created ${issue.key}, but ${attachReport.failed} attachment(s) failed to upload${failedAttachmentNames(attachReport.failedNames)} (${attachReport.firstError}).`,
+        `Created ${issue.key}, but ${attachReport.failed} attachment(s) failed to upload${failedAttachmentNames(attachReport.failedNames)} (${attachReport.firstError}).${commentSuffix}`,
         "error",
       );
     } else if (attachReport.descriptionError) {
       setStatus(
-        `Created ${issue.key} (attachments uploaded, but inline image embed failed).`,
+        `Created ${issue.key} (attachments uploaded, but inline image embed failed).${commentSuffix}`,
         "info",
       );
     } else {
-      setStatus(`Created ${issue.key}.`, "success");
+      setStatus(`Created ${issue.key}.${commentSuffix}`, "success");
     }
     renderTicketCard(issue.key, issueUrl);
     saveProjectHistory(projectKey);

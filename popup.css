@@ -1530,68 +1530,20 @@ tbody tr:last-child td {
 
 /* Per-ticket media upload progress (bulk flow): one row per ticket that has
    attachments, filled in real time as that ticket's files upload. Tickets are
-   processed one at a time, so the current row animates while the rest wait. */
+   processed one at a time, so the current row animates while the rest wait.
+   The header reuses the attachment picker's collapse UI (chevron + title
+   button, count on the right) so it reads the same as "Choose attachments". */
 .bulk-media-progress {
   margin-bottom: 12px;
-  padding: 10px 14px;
   background: var(--surface-muted);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: 8px;
+  padding: 6px 8px;
 }
 
-.bulk-media-progress-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-/* The whole head is a collapse toggle: click to shrink the panel to just the
-   active ticket's row (or expand to see every queued ticket). */
-.bulk-media-progress-toggle {
-  width: 100%;
-  padding: 0;
-  background: none;
-  border: none;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-}
-
-.bulk-media-progress-toggle:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.bulk-media-progress-toggle:hover .bulk-media-progress-title {
-  color: var(--text);
-}
-
-.bulk-media-caret {
-  flex: none;
-  width: 14px;
-  height: 14px;
-  color: var(--text-muted);
-  transition: transform 0.15s ease;
-}
-
-.bulk-media-progress[data-collapsed="true"] .bulk-media-caret {
+/* Same chevron rotation the attachment picker uses when its panel collapses. */
+.bulk-media-progress[data-collapsed="true"] .attachment-picker-chevron {
   transform: rotate(-90deg);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .bulk-media-caret {
-    transition: none;
-  }
-}
-
-.bulk-media-progress-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
 }
 
 .bulk-media-progress-count {
@@ -1610,7 +1562,7 @@ tbody tr:last-child td {
 }
 
 .bulk-media-row {
-  padding: 7px 9px;
+  padding: 9px 10px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -1621,7 +1573,7 @@ tbody tr:last-child td {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 5px;
+  margin-bottom: 6px;
 }
 
 .bulk-media-row-label {
@@ -1641,8 +1593,17 @@ tbody tr:last-child td {
   flex: none;
 }
 
+/* The uploading ticket is the star of the panel while a run is in flight:
+   accent-tinted card, accent border + soft glow, brighter label/pct — so it
+   stands apart from the dimmed pending rows and is easy to follow. */
+.bulk-media-row[data-state="uploading"] {
+  background: var(--accent-50);
+  border-color: var(--accent);
+  box-shadow: 0 4px 16px -8px rgba(91, 75, 255, 0.45);
+}
+
 .bulk-media-row[data-state="uploading"] .bulk-media-row-label {
-  color: var(--text);
+  color: var(--accent-strong);
 }
 
 .bulk-media-row[data-state="uploading"] .bulk-media-row-pct {
@@ -1663,10 +1624,35 @@ tbody tr:last-child td {
 }
 
 .bulk-media-row-track {
-  height: 5px;
+  height: 8px;
   background: var(--accent-100);
   border-radius: 999px;
   overflow: hidden;
+}
+
+/* Per-ticket file count under the bar ("Uploading 3 of 5 files…"). The line
+   is always present with a reserved height (min-height) so the row never
+   grows/shrinks as the status appears or its text changes — the hint shows
+   statically in place and is never collapsed while uploading. */
+.bulk-media-row-files {
+  display: block;
+  margin-top: 4px;
+  min-height: 14px;
+  line-height: 14px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bulk-media-row[data-state="uploading"] .bulk-media-row-files {
+  color: var(--accent);
+}
+
+.bulk-media-row[data-state="done"] .bulk-media-row-files {
+  color: var(--success);
 }
 
 .bulk-media-row-bar {
@@ -1677,6 +1663,21 @@ tbody tr:last-child td {
   transition: width 0.2s ease;
 }
 
+/* A soft pulse on the fill keeps the live bar visibly "in motion". */
+.bulk-media-row[data-state="uploading"] .bulk-media-row-bar {
+  animation: bulk-media-bar-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes bulk-media-bar-pulse {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.4);
+  }
+}
+
 .bulk-media-row[data-state="done"] .bulk-media-row-bar {
   background: var(--success);
 }
@@ -1685,5 +1686,9 @@ tbody tr:last-child td {
   .progress-bar,
   .bulk-media-row-bar {
     transition: none;
+  }
+
+  .bulk-media-row[data-state="uploading"] .bulk-media-row-bar {
+    animation: none;
   }
 }

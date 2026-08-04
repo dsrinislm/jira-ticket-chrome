@@ -343,8 +343,9 @@ function updateAttachmentSelectAll() {
 // Reflects "everything already on Jira" back onto the Include-attachments
 // toggle: when every listed attachment is already synced — found via the Jira
 // handshake, or after a sync uploaded them — the toggle is marked checked +
-// disabled and the picker is expanded to show the state. Otherwise the toggle
-// is left enabled for the user.
+// disabled. The picker is left in whatever collapsed/expanded state it's in:
+// a run auto-collapses it for upload progress and it must NOT pop back open
+// after completion. Otherwise the toggle is left enabled for the user.
 function updateAttachmentIncludeSyncState() {
   if (!includeAttachmentsInput) return;
   const allBoxes = attachmentGroups.querySelectorAll(
@@ -359,7 +360,6 @@ function updateAttachmentIncludeSyncState() {
   if (allSynced) {
     includeAttachmentsInput.checked = true;
     includeAttachmentsInput.disabled = true;
-    expandAttachmentPicker(attachmentPicker);
   } else {
     includeAttachmentsInput.disabled = false;
   }
@@ -689,8 +689,9 @@ let bulkPickerHasNoAttachments = false;
 // Reflects "everything already on Jira" back onto the Include-attachments
 // toggle: when every listed attachment is already synced — found via the Jira
 // handshake, or after an import uploaded them — the toggle is marked checked +
-// disabled and the picker is expanded to show the state. Otherwise the toggle
-// is left enabled for the user.
+// disabled. Like the single-ticket picker, the panel is left in its current
+// collapsed/expanded state — never re-opened after a run completes. Otherwise
+// the toggle is left enabled for the user.
 function updateBulkIncludeSyncState() {
   if (!bulkIncludeAttachments) return;
   const allBoxes = bulkAttachmentGroups.querySelectorAll(
@@ -705,7 +706,6 @@ function updateBulkIncludeSyncState() {
   if (allSynced) {
     bulkIncludeAttachments.checked = true;
     bulkIncludeAttachments.disabled = true;
-    expandAttachmentPicker(bulkAttachmentPicker);
   } else {
     bulkIncludeAttachments.disabled = false;
   }
@@ -1492,7 +1492,14 @@ export function setupBulkMediaProgress(labels) {
     bar.className = "bulk-media-row-bar";
     track.appendChild(bar);
 
-    row.append(head, track);
+    // Per-ticket file count under the bar ("3 of 5 files uploaded…"),
+    // filled in by updateBulkMediaFiles as files complete. Starts at "0 files"
+    // so the hint line is present (and the row height fixed) from the start.
+    const files = document.createElement("div");
+    files.className = "bulk-media-row-files";
+    files.textContent = "0 files";
+
+    row.append(head, track, files);
     bulkMediaProgressList.appendChild(row);
   });
   if (bulkMediaProgress) bulkMediaProgress.style.display = labels.length ? "block" : "none";
@@ -1539,7 +1546,8 @@ export function updateBulkMediaProgress(rowIndex, loaded, total, label) {
   if (total > 0 && loaded >= total) setBulkMediaProgressDone(rowIndex);
 }
 
-// Marks a ticket's media upload as finished (100%, green).
+// Marks a ticket's media upload as finished (100%, green) and finalizes the
+// file-count hint: "N files uploaded" (or "N of M" when some failed).
 export function setBulkMediaProgressDone(rowIndex) {
   const row = bulkMediaProgressList?.children[rowIndex];
   if (!row) return;
@@ -1548,7 +1556,36 @@ export function setBulkMediaProgressDone(rowIndex) {
   if (bar) bar.style.width = "100%";
   const pctEl = row.querySelector(".bulk-media-row-pct");
   if (pctEl) pctEl.textContent = "100%";
+  const hint = row.querySelector(".bulk-media-row-files");
+  const total = Number(row.dataset.filesTotal);
+  const uploaded = Number(row.dataset.filesUploaded);
+  if (hint && total > 0) {
+    hint.textContent =
+      uploaded < total
+        ? `${uploaded} of ${total} file${total === 1 ? "" : "s"} uploaded`
+        : `${total} file${total === 1 ? "" : "s"} uploaded`;
+  }
   refreshBulkMediaRowVisibility();
+}
+
+// Per-ticket file progress for the hint under the bar. `uploaded`/`total` are
+// file counts on this ticket; while still uploading it reads "X of N
+// files…", and once the row is done setBulkMediaProgressDone rewrites it.
+export function updateBulkMediaFiles(rowIndex, uploaded, total) {
+  const row = bulkMediaProgressList?.children[rowIndex];
+  if (!row) return;
+  row.dataset.filesUploaded = String(uploaded);
+  row.dataset.filesTotal = String(total);
+  const hint = row.querySelector(".bulk-media-row-files");
+  if (!hint) return;
+  if (row.dataset.state === "done") {
+    hint.textContent =
+      uploaded < total
+        ? `${uploaded} of ${total} file${total === 1 ? "" : "s"} uploaded`
+        : `${total} file${total === 1 ? "" : "s"} uploaded`;
+  } else {
+    hint.textContent = `Uploading ${uploaded} of ${total} file${total === 1 ? "" : "s"}…`;
+  }
 }
 
 export function hideBulkMediaProgress() {

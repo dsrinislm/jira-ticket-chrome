@@ -12,11 +12,15 @@ const SITES = [
   },
   {
     name: "Spark",
+    // ServiceNow is API-first: the sys_id in the details URL drives the
+    // same-origin Table API (see scrapeInPage's sparkIncidentApiPath). These
+    // selectors are only the fallback — when the API can't be reached from
+    // the page context (401, blocked fetch, non-ServiceNow frame), the flow
+    // reads the incident form directly instead of failing outright.
     idSelector: 'input[name="incident.number"]',
     titleSelectors: 'input[name="incident.short_description"]',
     editorSelector: 'textarea[name="incident.description"]',
     attachmentSelector: ".attachment_list_items .content_editable",
-    embedImages: false,
   },
 ];
 
@@ -25,24 +29,25 @@ export function getSite(name) {
 }
 
 // Runs in the tab's page context: returns the name of the first site whose
-// idSelector and titleSelectors all match the DOM, or null. Octane is deduced
-// from its SPA URL alone (the workspace param in ?p=) — the entity-id header
-// element is never present on the listing page, so detection must not depend
-// on the DOM.
+// details page this is, or null. Both sites are deduced from their URL alone:
+// Octane from the SPA workspace param in ?p= (the entity-id header element is
+// never present on the listing page, so detection must not depend on the DOM),
+// and Spark from an incident.do URL carrying a sys_id — no form fields involved.
 function detectInPage(sites) {
-  const matches = (selector) =>
-    selector ? !!document.querySelector(selector) : false;
-
-  for (const site of sites) {
-    if (!site.idSelector || !site.titleSelectors) continue;
-    const idFound = matches(site.idSelector);
-    const titleFound = [].concat(site.titleSelectors).some(matches);
-    if (idFound && titleFound) return site.name;
-  }
-
   const octane = sites.find((s) => s.name === "Octane");
   if (octane && /[?&]p=[^&#/]+\/[^&#]+/.test(location.search || "")) {
     return "Octane";
+  }
+
+  const spark = sites.find((s) => s.name === "Spark");
+  if (spark) {
+    const searchAndHash = (location.search || "") + (location.hash || "");
+    const isIncidentUrl = /incident\.do/.test(
+      (location.pathname || "") + searchAndHash,
+    );
+    if (isIncidentUrl && /[?&]sys_id=[^&#]/.test(searchAndHash)) {
+      return "Spark";
+    }
   }
 
   return null;
@@ -74,7 +79,12 @@ export async function getCurrentTab() {
   return tabs[0];
 }
 
-export async function scrapeInPage(site, options = {}) {
+// NOTE: functions passed to chrome.scripting.executeScript (func:) must NOT
+// be `export`-prefixed. Function.prototype.toString() keeps the `export`
+// keyword on module-level exported functions in some Chrome builds, and the
+// injected source is then evaluated as a classic script → "Unexpected token
+// 'export'". They're exported via the export{} list at the bottom instead.
+async function scrapeInPage(site, options = {}) {
   const includeAttachments = options.includeAttachments !== false;
   const selectedAttachments = options.selectedAttachments || null;
   // When false, the scrape only LISTS the selected attachment names without
@@ -89,21 +99,6 @@ export async function scrapeInPage(site, options = {}) {
   // REGARDLESS of the attachments checkbox: they're inline description
   // content, not selectable attachment files.
   const captureEmbeddedImages = options.captureEmbeddedImages !== false;
-
-  const textOf = (el) => {
-    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-      return el.value;
-    }
-    if (!String(el.textContent || "").trim()) {
-      const nested = el.querySelector("input, textarea");
-      if (nested) return textOf(nested);
-    }
-    return el.textContent;
-  };
-  const readText = (selector) => {
-    const el = document.querySelector(selector);
-    return el ? String(textOf(el)).replace(/\s+/g, " ").trim() : null;
-  };
 
   // --- Octane: minimal-DOM id + REST API path --------------------------------
   // Octane is an SPA: the URL only pins the workspace (?p=<sharedSpace>/<workspace>),
@@ -310,179 +305,336 @@ export async function scrapeInPage(site, options = {}) {
     };
   }
 
-  // --- Spark (ServiceNow): DOM path -----------------------------------------
-  const id = readText(site.idSelector);
+  // Runs in the page context, so it must be self-contained (no module imports).
+  // Fetches one incident's details entirely through the ServiceNow Table API —
+  // no DOM. Returns null when the page can't provide an API context (no sys_id
+  // in the URL, a non-ServiceNow frame, an API error, or no record).
+  async function sparkIncidentApiPath() {
+    const searchMatch = /[?&]sys_id=([^&]+)/.exec(location.search || "");
+    const hashMatch = /sys_id=([^&]+)/.exec(location.hash || "");
+    const sysId = (searchMatch && searchMatch[1]) || (hashMatch && hashMatch[1]);
+    if (!sysId) return null;
 
-  let title = "";
-  let titleFound = false;
-  for (const selector of [].concat(site.titleSelectors)) {
-    const value = readText(selector);
-    if (value !== null) {
-      title = value;
-      titleFound = true;
-      break;
+    // ServiceNow Table API, authenticated the same way the page itself does:
+    // the session cookie plus the page's CSRF token (window.g_ck) sent as
+    // X-UserToken. This instance enforces the token on API calls, so it's
+    // required even for GETs. Runs in the MAIN world (scrapeTab) so the page
+    // global is visible.
+    const userToken =
+      (typeof window !== "undefined" && window.g_ck) ||
+      document.querySelector('meta[name="X-UserToken"]')?.content ||
+      document.querySelector('input[name="X-UserToken"]')?.value ||
+      "";
+    const apiHeaders = { Accept: "application/json" };
+    if (userToken) apiHeaders["X-UserToken"] = userToken;
+
+    // Bounded retry for transient failures — a flaky network dropping a
+    // fetch shouldn't fail the export.
+    async function fetchWithRetry(url, options, tries = 2) {
+      let lastError;
+      for (let attempt = 0; attempt < tries; attempt++) {
+        if (attempt > 0) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, 300 * attempt + Math.random() * 200),
+          );
+        }
+        let response;
+        try {
+          response = await fetch(url, options);
+        } catch (err) {
+          lastError = err;
+          continue;
+        }
+        if (
+          response.status === 429 ||
+          (response.status >= 500 && response.status <= 599)
+        ) {
+          lastError = new Error(`Spark API ${response.status}`);
+          continue;
+        }
+        return response;
+      }
+      throw lastError || new Error("Spark API fetch failed");
     }
+
+    // Downloads a file to a data URL over the same session+CSRF. Resolves to
+    // null when the fetch fails — a bad file is dropped rather than aborting.
+    async function sparkFetchToDataUrl(url, accept) {
+      const headers = userToken ? { "X-UserToken": userToken } : {};
+      if (accept) headers.Accept = accept;
+      try {
+        const response = await fetchWithRetry(
+          url,
+          { credentials: "include", headers },
+          2,
+        );
+        if (!response.ok) return null;
+        const blob = await response.blob();
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      } catch {
+        return null;
+      }
+    }
+
+    // Strips markup to plain text (mirrors the bulk path's plainText).
+    const plainText = (value) => {
+      if (!value) return "";
+      return new DOMParser()
+        .parseFromString(String(value), "text/html")
+        .body.textContent.replace(/\s+/g, " ")
+        .trim();
+    };
+
+    // The description comes back as plain text (escaped for htmlToADF) or rich
+    // HTML whose embedded images follow captureEmbeddedImages on their own —
+    // inline content, independent of the attachments checkbox.
+    async function captureDescription(raw) {
+      const images = [];
+      const source = String(raw || "");
+      if (!/<[a-zA-Z][^>]*>/.test(source)) {
+        const escaped = source.replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[c]);
+        return { html: escaped, images };
+      }
+      const doc = new DOMParser().parseFromString(source, "text/html");
+      if (captureEmbeddedImages) {
+        let next = 0;
+        for (const imgEl of Array.from(doc.querySelectorAll("img"))) {
+          if (!imgEl.src) {
+            imgEl.remove();
+            continue;
+          }
+          const placeholder = `__JIRA_IMG_${next++}__`;
+          const dataUrl = await sparkFetchToDataUrl(
+            new URL(imgEl.src, location.href).href,
+          );
+          if (dataUrl) {
+            images.push({ placeholder, dataUrl });
+            imgEl.replaceWith(doc.createTextNode(placeholder));
+          } else {
+            imgEl.remove();
+          }
+        }
+      }
+      return { html: doc.body ? doc.body.innerHTML : "", images };
+    }
+
+    const recordResponse = await fetchWithRetry(
+      `${location.origin}/api/now/table/incident/${encodeURIComponent(sysId)}?sysparm_fields=number,short_description,description&sysparm_display_value=false`,
+      { credentials: "include", headers: apiHeaders },
+    );
+    if (!recordResponse.ok) {
+      console.error(
+        `[jira-ext] Spark incident API ${recordResponse.status} for ${sysId}`,
+        location.href,
+      );
+      return null;
+    }
+    const json = await recordResponse.json().catch(() => null);
+    const record = Array.isArray(json?.result) ? json.result[0] : json?.result;
+    if (!record) return null;
+
+    const number = String(record.number || "").trim();
+    const shortDescription = plainText(record.short_description);
+    if (!shortDescription && !number) return null;
+
+    const { html, images } = await captureDescription(record.description);
+    const jiraTitle = ["SPARK", number, shortDescription]
+      .filter(Boolean)
+      .join(" | ");
+
+    // The incident's sys_attachment rows (what the details page shows under
+    // the attachment section), listed through the Table API and downloaded as
+    // data URLs. includeAttachments is the master switch; the picker's
+    // selection narrows the files; captureAttachments === false is the cheap
+    // metadata pass (names only, no bytes).
+    if (includeAttachments) {
+      const attResponse = await fetchWithRetry(
+        `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(sysId)}&sysparm_fields=sys_id,file_name,content_type&sysparm_display_value=false&sysparm_limit=1000`,
+        { credentials: "include", headers: apiHeaders },
+      );
+      let rows = [];
+      if (attResponse.ok) {
+        const attJson = await attResponse.json().catch(() => null);
+        rows = Array.isArray(attJson?.result) ? attJson.result : [];
+      }
+      const selected = selectedAttachments
+        ? new Set(selectedAttachments)
+        : null;
+      let next = images.length;
+      for (const att of rows) {
+        if (!att?.sys_id || !att?.file_name) continue;
+        const name = String(att.file_name).trim();
+        if (!name || (selected && !selected.has(name))) continue;
+        if (captureAttachments === false) {
+          // Metadata pass — names only, no byte downloads.
+          images.push({ name });
+          continue;
+        }
+        const dataUrl = await sparkFetchToDataUrl(
+          `${location.origin}/api/now/attachment/${encodeURIComponent(att.sys_id)}/file`,
+          "*/*",
+        );
+        if (dataUrl) {
+          images.push({
+            placeholder: `__JIRA_IMG_${next++}__`,
+            dataUrl,
+            name,
+          });
+        }
+      }
+    }
+
+    return {
+      title: jiraTitle,
+      id: number,
+      source: site.name,
+      url: `${location.origin}/nav_to.do?uri=incident.do?sys_id=${encodeURIComponent(sysId)}`,
+      html,
+      text: plainText(record.description),
+      images,
+    };
   }
 
-  if (id === null || !titleFound) {
+  // DOM fallback for sparkIncidentApiPath — reads the incident form directly
+  // when the Table API can't be reached from the page context. Mirrors the
+  // old pre-API single-ticket path: the number/short_description inputs, the
+  // description textarea (escaped for htmlToADF), and the attachment section's
+  // links (name-only in the metadata pass, bytes on capture). Returns null
+  // when the form isn't present.
+  async function sparkIncidentDomPath() {
+    const readText = (selector) => {
+      const el = document.querySelector(selector);
+      if (!el) return null;
+      let raw;
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        raw = el.value;
+      } else {
+        raw = el.textContent;
+        if (!String(raw || "").trim()) {
+          const nested = el.querySelector("input, textarea");
+          if (nested) raw = nested.value;
+        }
+      }
+      return String(raw ?? "").replace(/\s+/g, " ").trim() || null;
+    };
+
+    const id = readText(site.idSelector);
+    const title = readText(site.titleSelectors);
+    if (!id && !title) return null;
+
+    const editor = document.querySelector(site.editorSelector);
+    let text = "";
+    let html = "";
+    if (editor) {
+      text = String(editor.value ?? "");
+      html = text.replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c]);
+    }
+
+    const images = [];
+    if (includeAttachments && site.attachmentSelector) {
+      const selected = selectedAttachments
+        ? new Set(selectedAttachments)
+        : null;
+      let next = 0;
+      for (const container of Array.from(
+        document.querySelectorAll(site.attachmentSelector),
+      )) {
+        const href = container.getAttribute?.("href");
+        if (!href) continue;
+        const name = (container.textContent || "").trim();
+        if (!name || (selected && !selected.has(name))) continue;
+        if (captureAttachments === false) {
+          images.push({ name });
+          continue;
+        }
+        try {
+          let downloadUrl;
+          try {
+            downloadUrl = new URL(href, location.href).href;
+          } catch {
+            // Malformed href — drop this file rather than aborting.
+            continue;
+          }
+          const response = await fetch(downloadUrl, {
+            credentials: "include",
+          });
+          const blob = await response.blob();
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+          const placeholder = `__JIRA_IMG_${next++}__`;
+          images.push({ placeholder, dataUrl, name });
+          html += `<p>${placeholder}</p>`;
+        } catch {
+          // Couldn't fetch this file — drop it rather than aborting.
+        }
+      }
+    }
+
+    return {
+      title: [site.name.toUpperCase(), id, title].filter(Boolean).join(" | "),
+      id: id || "",
+      source: site.name,
+      url: location.href,
+      html,
+      text,
+      images,
+    };
+  }
+
+  // --- Spark (ServiceNow): same-origin Table API path ------------------------
+  // Spark's details page is a form, but reading its fields out of the DOM
+  // (input[name="incident.number"], input[name="incident.short_description"],
+  // textarea[name="incident.description"], .attachment_list_items
+  // .content_editable) is brittle: fields can live in frames, and journal
+  // entries are collapsed. The sys_journal_field / incident / sys_attachment
+  // Table APIs (the same endpoints the details page is driven from) are the
+  // primary source. All the id ever provides is the incident's sys_id, pulled
+  // from the details URL — the number, short description, description, and
+  // attachments all come down over the API. The DOM path below is only the
+  // fallback: when the API can't be reached from the page context (401,
+  // blocked fetch, non-ServiceNow frame), the form itself is read instead so
+  // the flow keeps working.
+  if (site.name === "Spark") {
+    const viaApi = await sparkIncidentApiPath().catch((err) => {
+      console.error("[jira-ext] Spark incident API path failed:", err);
+      return null;
+    });
+    if (viaApi?.title) return viaApi;
+
+    const viaDom = await sparkIncidentDomPath();
+    if (viaDom?.title) return viaDom;
+
     return {
       title: "",
       id: "",
       source: site.name,
       url: location.href,
       html: "",
+      text: "",
       images: [],
     };
   }
-
-  const jiraTitle = [site.name.toUpperCase(), id, title].filter(Boolean).join(" | ");
-
-  const images = [];
-  let html = "";
-
-  // Downloads a file over the same session and resolves to its data URL.
-  async function fetchDataUrl(url) {
-    const response = await fetch(url, { credentials: "include" });
-    const blob = await response.blob();
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = reject;
-      reader.readAsDataURL(blob);
-    });
-  }
-
-  // One bounded pool shared by every capture step, mirroring the bulk flow's
-  // pacing: single-ticket exports used to fetch files strictly one-by-one,
-  // so a many-attachment ticket took N serial round trips. A small pool
-  // keeps the same session and per-file capture while cutting wall time by
-  // roughly the pool size. Results keep source order so each placeholder
-  // still lines up with the file it was captured from.
-  const MAX_CAPTURE_PAR = 4;
-  let nextImageIndex = 0;
-
-  // Fetches `url` to a data URL, records it in `images`, and returns its
-  // `__JIRA_IMG_n__` placeholder (or null when the fetch failed — a bad
-  // file is dropped rather than aborting the whole capture).
-  async function captureOne(url, name) {
-    const placeholder = `__JIRA_IMG_${nextImageIndex++}__`;
-    try {
-      const dataUrl = await fetchDataUrl(url);
-      images.push({ placeholder, dataUrl, name: name || null });
-      return placeholder;
-    } catch {
-      return null;
-    }
-  }
-
-  // Runs `sources` ({ url, name }[]) through the bounded pool, returning the
-  // placeholders (null per failed source) in the same order as `sources`.
-  async function captureAll(sources) {
-    const out = new Array(sources.length).fill(null);
-    let next = 0;
-    const worker = async () => {
-      while (next < sources.length) {
-        const i = next++;
-        out[i] = await captureOne(sources[i].url, sources[i].name);
-      }
-    };
-    await Promise.all(
-      Array.from({ length: Math.min(MAX_CAPTURE_PAR, sources.length) }, worker),
-    );
-    return out;
-  }
-
-  // Clones a container, swaps each <img> for a placeholder, and returns the
-  // resulting fragment HTML.
-  async function captureImages(container) {
-    const clone = container.cloneNode(true);
-    const imgEls = Array.from(clone.querySelectorAll("img"));
-
-    const placeholders = await captureAll(
-      imgEls.map((imgEl) => ({ url: imgEl.src, name: null })),
-    );
-    imgEls.forEach((imgEl, i) => {
-      const placeholder = placeholders[i];
-      if (placeholder) {
-        imgEl.replaceWith(document.createTextNode(placeholder));
-      } else {
-        imgEl.remove();
-      }
-    });
-
-    return clone.innerHTML;
-  }
-
-  const editor = document.querySelector(site.editorSelector);
-
-  // Raw text of Spark's plain-text description textarea — kept alongside the
-  // escaped html so callers can show it without markup.
-  let text = "";
-
-  if (editor) {
-    // The textarea holds no markup — capture its value escaped as HTML, since
-    // innerHTML would be empty.
-    text = String(editor.value ?? "");
-    html = text.replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    })[c]);
-  }
-
-  if (includeAttachments && site.attachmentSelector) {
-    const containers = Array.from(
-      document.querySelectorAll(site.attachmentSelector),
-    );
-    const sources = [];
-    for (const container of containers) {
-      const href = container.getAttribute?.("href");
-      if (href) {
-        // The link's text content is the attachment's file name.
-        const name = (container.textContent || "").trim() || null;
-        if (selectedAttachments && (!name || !selectedAttachments.includes(name))) {
-          continue;
-        }
-        if (captureAttachments === false) {
-          // Metadata pass — names only, no byte downloads.
-          if (name) images.push({ name });
-        } else {
-          sources.push({ url: href, name });
-        }
-      } else {
-        if (captureAttachments === false || captureEmbeddedImages === false) continue;
-        // Embedded images have no attachment name to match against the
-        // picker, so they follow the toggle rather than the name selection —
-        // except an explicit "deselected everything" still means upload none.
-        if (selectedAttachments && selectedAttachments.length === 0) continue;
-        const frag = await captureImages(container);
-        if (site.embedImages !== false) {
-          const placeholders = Array.from(
-            frag.matchAll(/__JIRA_IMG_(\d+)__/g),
-          );
-          html += placeholders.map((m) => `<p>${m[0]}</p>`).join("");
-        }
-      }
-    }
-    const placeholders = await captureAll(sources);
-    if (site.embedImages !== false) {
-      for (const placeholder of placeholders) {
-        if (placeholder) html += `<p>${placeholder}</p>`;
-      }
-    }
-  }
-
-  return {
-    title: jiraTitle,
-    id,
-    source: site.name,
-    url: location.href,
-    html,
-    text,
-    images,
-  };
 }
 
 // Runs in the tab's own page context — same constraints as scrapeInPage.
@@ -490,20 +642,15 @@ export async function scrapeInPage(site, options = {}) {
 // WITHOUT fetching the file bytes. This cheap metadata pass feeds the popup's
 // attachment picker, so the user picks which files to upload before the slow
 // byte-by-byte capture ever runs. Octane lists through the REST API (no DOM);
-// Spark reads its attachment-list markup and resolves each file's byte size
-// through the ServiceNow sys_attachment Table API.
-export async function listTicketAttachmentsInPage(site) {
+// Spark lists through the ServiceNow sys_attachment Table API (no DOM either).
+async function listTicketAttachmentsInPage(site) {
+  try {
   const VIDEO_EXTS = new Set([
     "mp4", "m4v", "mov", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg",
   ]);
   const IMAGE_EXTS = new Set([
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff", "ico",
   ]);
-
-  const sizeOf = (container) => {
-    const m = /([\d.]+\s*(?:KB|MB|GB))/i.exec(container.textContent || "");
-    return m ? m[1] : "";
-  };
 
   // Formats API-reported byte sizes into the picker's human-readable label.
   const formatFileSize = (bytes) => {
@@ -519,17 +666,6 @@ export async function listTicketAttachmentsInPage(site) {
       if (size < 1024) break;
     }
     return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
-  };
-
-  const typeOf = (container, name) => {
-    // Octane tiles carry a data-aid like "video-attachment-tile-<name>".
-    const aid = container.getAttribute?.("data-aid") || "";
-    const byAid = /^(video|image|other)-attachment-tile/.exec(aid);
-    if (byAid) return byAid[1];
-    const ext = (name.split(".").pop() || "").toLowerCase();
-    if (VIDEO_EXTS.has(ext)) return "video";
-    if (IMAGE_EXTS.has(ext)) return "image";
-    return "other";
   };
 
   // Octane: the SPA URL only pins the workspace, so the ticket id comes from
@@ -611,72 +747,118 @@ export async function listTicketAttachmentsInPage(site) {
       });
   }
 
-  // Spark: the attachment-list markup shows sizes only as human-readable
-  // labels ("1.2 MB"), which the picker can't turn into byte math for the
-  // upload cutoff. Ask the ServiceNow Table API for this incident's
-  // sys_attachment size_bytes (same endpoint the details page's attachment
-  // section is driven from) and match rows back to the DOM by file name.
-  // Falls back to the DOM label when the API can't be reached — no sys_id in
-  // the URL, a non-ServiceNow frame, an API error, or a name the API doesn't
-  // report.
-  let sparkSizesByName = null;
+  // Spark: list the incident's sys_attachment rows directly through the
+  // ServiceNow Table API (the same endpoint the details page's attachment
+  // section is driven from) — no DOM. The API supplies file_name, content_type,
+  // and size_bytes, so name, type, and the byte-accurate size all come straight
+  // through (the DOM only shows human-readable labels like "1.2 MB", which the
+  // picker can't turn into byte math for the upload cutoff). When the API
+  // can't be reached (no sys_id in the URL, a 401/error, or a non-ServiceNow
+  // frame), the picker falls back to reading the attachment section's links
+  // with their human-readable size labels, so the single-ticket flow still
+  // lists files even without an API context.
   if (site.name === "Spark") {
+    // DOM fallback: the attachment section's links. Labels only carry
+    // human-readable sizes ("1.2 MB"), which feed the upload-cutoff math
+    // through attachmentByteSize's label parser.
+    const domItems = () => {
+      const items = [];
+      if (!site.attachmentSelector) return items;
+      for (const container of Array.from(
+        document.querySelectorAll(site.attachmentSelector),
+      )) {
+        const href = container.getAttribute?.("href");
+        const name = (container.textContent || "").trim();
+        if (!href || !name) continue;
+        let url;
+        try {
+          url = new URL(href, location.href).href;
+        } catch {
+          // Malformed href — skip this file rather than failing the picker.
+          continue;
+        }
+        const ext = (name.split(".").pop() || "").toLowerCase();
+        const sizeLabel = (() => {
+          const m = /([\d.]+\s*(?:KB|MB|GB))/i.exec(container.textContent || "");
+          return m ? m[1] : "";
+        })();
+        items.push({
+          name,
+          url,
+          type: VIDEO_EXTS.has(ext)
+            ? "video"
+            : IMAGE_EXTS.has(ext)
+              ? "image"
+              : "other",
+          size: sizeLabel,
+          sizeBytes: null,
+        });
+      }
+      return items;
+    };
+
     const searchMatch = /[?&]sys_id=([^&]+)/.exec(location.search || "");
     const hashMatch = /sys_id=([^&]+)/.exec(location.href.split("#")[1] || "");
     const sysId = (searchMatch && searchMatch[1]) || (hashMatch && hashMatch[1]);
-    if (sysId) {
-      const userToken =
-        (typeof window !== "undefined" && window.g_ck) ||
-        document.querySelector('meta[name="X-UserToken"]')?.content ||
-        document.querySelector('input[name="X-UserToken"]')?.value ||
-        "";
-      const headers = { Accept: "application/json" };
-      if (userToken) headers["X-UserToken"] = userToken;
-      try {
-        const response = await fetch(
-          `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(sysId)}&sysparm_fields=file_name,size_bytes&sysparm_display_value=false&sysparm_limit=1000`,
-          { credentials: "include", headers },
+    if (!sysId) return domItems();
+
+    const userToken =
+      (typeof window !== "undefined" && window.g_ck) ||
+      document.querySelector('meta[name="X-UserToken"]')?.content ||
+      document.querySelector('input[name="X-UserToken"]')?.value ||
+      "";
+    const headers = { Accept: "application/json" };
+    if (userToken) headers["X-UserToken"] = userToken;
+
+    try {
+      const response = await fetch(
+        `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(sysId)}&sysparm_fields=sys_id,file_name,content_type,size_bytes&sysparm_display_value=false&sysparm_limit=1000`,
+        { credentials: "include", headers },
+      );
+      if (!response.ok) {
+        console.error(
+          `[jira-ext] Spark attachments API ${response.status} for ${sysId}`,
+          location.href,
         );
-        if (response.ok) {
-          const json = await response.json();
-          const rows = Array.isArray(json?.result) ? json.result : [];
-          const byName = new Map();
-          for (const row of rows) {
-            const name = String(row?.file_name || "").trim();
-            const bytes = Number(row?.size_bytes);
-            if (name && Number.isFinite(bytes) && bytes >= 0) {
-              byName.set(name, bytes);
-            }
-          }
-          if (byName.size) sparkSizesByName = byName;
-        }
-      } catch {
-        sparkSizesByName = null;
+        return domItems();
       }
+      const json = await response.json();
+      const items = [];
+      for (const row of Array.isArray(json?.result) ? json.result : []) {
+        const name = String(row?.file_name || "").trim();
+        if (!name) continue;
+        const ext = (name.split(".").pop() || "").toLowerCase();
+        const type = VIDEO_EXTS.has(ext)
+          ? "video"
+          : IMAGE_EXTS.has(ext)
+            ? "image"
+            : "other";
+        const sizeBytes = Number(row?.size_bytes);
+        items.push({
+          name,
+          url: `${location.origin}/api/now/attachment/${encodeURIComponent(String(row.sys_id || ""))}/file`,
+          type,
+          size: formatFileSize(sizeBytes),
+          sizeBytes:
+            Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
+        });
+      }
+      // The API answered but reported nothing — trust the rendered markup
+      // (e.g. the sys_attachment table is empty for this user but the form
+      // still shows files).
+      if (items.length) return items;
+      return domItems();
+    } catch (err) {
+      console.error("[jira-ext] Spark attachments API failed:", err);
+      return domItems();
     }
   }
 
-  const items = [];
-
-  if (site.attachmentSelector) {
-    for (const container of Array.from(
-      document.querySelectorAll(site.attachmentSelector),
-    )) {
-      const href = container.getAttribute?.("href");
-      const name = (container.textContent || "").trim();
-      if (!href || !name) continue;
-      const sizeBytes = sparkSizesByName ? sparkSizesByName.get(name) ?? null : null;
-      items.push({
-        name,
-        url: new URL(href, location.href).href,
-        type: typeOf(container, name),
-        size: sizeBytes != null ? formatFileSize(sizeBytes) : sizeOf(container),
-        sizeBytes,
-      });
-    }
+  return [];
+  } catch (err) {
+    console.error("[jira-ext] listTicketAttachmentsInPage failed:", err);
+    return [];
   }
-
-  return items;
 }
 
 
@@ -686,17 +868,25 @@ export async function listTicketAttachmentsInTab(siteName) {
 
   const currentTab = await getCurrentTab();
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: currentTab.id, allFrames: true },
-    func: listTicketAttachmentsInPage,
-    args: [site],
-    // Spark sizes come from the ServiceNow Table API, which only authenticates
-    // when the request is issued from the page's own context (MAIN world) —
-    // an isolated-world native fetch gets a 401 Basic challenge and Chrome
-    // then shows the Basic-auth dialog, which JS can't suppress. Octane's
-    // cookie-only API works fine from the isolated world.
-    world: siteName === "Spark" ? "MAIN" : "ISOLATED",
-  });
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: currentTab.id, allFrames: true },
+      func: listTicketAttachmentsInPage,
+      args: [site],
+      // Spark sizes come from the ServiceNow Table API, which only authenticates
+      // when the request is issued from the page's own context (MAIN world) —
+      // an isolated-world native fetch gets a 401 Basic challenge and Chrome
+      // then shows the Basic-auth dialog, which JS can't suppress. Octane's
+      // cookie-only API works fine from the isolated world.
+      world: siteName === "Spark" ? "MAIN" : "ISOLATED",
+    });
+  } catch (err) {
+    // Injection refused (restricted frame/URL) — the picker shows empty
+    // rather than failing the whole single-ticket flow.
+    console.error("[jira-ext] Attachment listing injection failed:", err);
+    return [];
+  }
 
   // Prefer the frame that actually found attachments, then any result.
   return (
@@ -711,7 +901,7 @@ export async function listTicketAttachmentsInTab(siteName) {
 // which files to upload across every selected ticket. Returns an array of
 // groups — { id, attachments: [{ name, size, sizeBytes, type }] } — one per
 // requested id. Runs in the page context, so it must be self-contained.
-export async function listListingAttachmentsInPage(ids, siteName) {
+async function listListingAttachmentsInPage(ids, siteName) {
   const VIDEO_EXTS = new Set([
     "mp4", "m4v", "mov", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg",
   ]);
@@ -857,11 +1047,24 @@ export async function scrapeTab(tabId, siteName, options = {}) {
 
   // Scrape in every frame (the site's form may be in an iframe) and pick
   // the first frame where the site's selectors matched and produced a title.
-  const results = await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    func: scrapeInPage,
-    args: [site, options],
-  });
+  // Spark runs in the MAIN world: its Table API only authenticates when the
+  // request is issued from the page's own context (window.g_ck lives there) —
+  // an isolated-world native fetch gets a 401 Basic challenge, and Chrome then
+  // shows the Basic-auth dialog, which JS can't suppress.
+  let results;
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: scrapeInPage,
+      args: [site, options],
+      world: siteName === "Spark" ? "MAIN" : "ISOLATED",
+    });
+  } catch (err) {
+    // Injection refused (restricted frame/URL) — treat as "no ticket open"
+    // rather than failing the flow.
+    console.error("[jira-ext] Scrape injection failed:", err);
+    return null;
+  }
 
   return (results.find((r) => r.result?.title) || results[0])?.result;
 }
@@ -881,7 +1084,7 @@ async function getPageData(siteName, options = {}) {
 // item's detail-page URL so the extension can open + scrape it per ticket.
 
 // Runs in the page context: collects the grid rows the user ticked.
-export function scrapeSelectedListingInPage() {
+function scrapeSelectedListingInPage() {
   const items = [];
 
   document.querySelectorAll("div.slick-row").forEach((row) => {
@@ -963,13 +1166,17 @@ function detectTabStateInPage(sites) {
   };
 
   let site = null;
-  for (const s of sites) {
-    if (!s.idSelector || !s.titleSelectors) continue;
-    const idFound = matches(s.idSelector);
-    const titleFound = [].concat(s.titleSelectors).some(matches);
-    if (idFound && titleFound) {
-      site = s.name;
-      break;
+
+  // Same URL-only Spark signal as detectInPage — an incident.do URL carrying a
+  // sys_id is a details page; no form fields are involved.
+  const spark = sites.find((s) => s.name === "Spark");
+  if (spark) {
+    const searchAndHash = (location.search || "") + (location.hash || "");
+    const isIncidentUrl = /incident\.do/.test(
+      (location.pathname || "") + searchAndHash,
+    );
+    if (isIncidentUrl && /[?&]sys_id=[^&#]/.test(searchAndHash)) {
+      site = "Spark";
     }
   }
 
@@ -1062,7 +1269,7 @@ export async function detectTabState() {
 
 // Runs in the page context: collects the ServiceNow incident rows the user
 // ticked. Each returns { id, number, name, description, url }.
-export function scrapeSelectedSparkListingInPage() {
+function scrapeSelectedSparkListingInPage() {
   const items = [];
 
   document.querySelectorAll("tr.list_row").forEach((row) => {
@@ -1134,7 +1341,7 @@ export async function scrapeSelectedSparkListingInTab() {
 
 // --- Listing detail via the same-origin REST API ----------------------------
 
-export function fetchListingDetailsInPage(ids, site, options = {}) {
+function fetchListingDetailsInPage(ids, site, options = {}) {
   const idList = Array.isArray(ids) ? ids : [ids];
   const includeAttachments = options.includeAttachments !== false;
 
@@ -1528,4 +1735,103 @@ export async function fetchListingDetailsInTab(ids, site, options = {}) {
   return out.items || [];
 }
 
-export { getPageData, detectSiteInTab };
+// Runs in the page context: fetches a Spark incident's journal entries (public
+// comments + internal work notes) through the ServiceNow Table API — no DOM
+// scraping. Journal entries are notoriously collapsed in the details DOM, so
+// sys_journal_field (the same endpoint the details page is driven from) is the
+// only reliable source. `ids` are the incidents' sys_ids; returns one group per
+// id, [{ id, comments: [{ kind, author, createdAt, text }] }], with comments
+// ordered oldest-first. A failed fetch yields an empty list for that incident
+// rather than failing the caller.
+async function fetchSparkCommentsInPage(ids) {
+  const idList = Array.isArray(ids) ? ids : [ids];
+
+  const userToken =
+    (typeof window !== "undefined" && window.g_ck) ||
+    document.querySelector('meta[name="X-UserToken"]')?.content ||
+    document.querySelector('input[name="X-UserToken"]')?.value ||
+    "";
+  const headers = { Accept: "application/json" };
+  if (userToken) headers["X-UserToken"] = userToken;
+
+  const fetchIncident = async (id) => {
+    const comments = [];
+    try {
+      const response = await fetch(
+        `${location.origin}/api/now/table/sys_journal_field?sysparm_query=element_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=element,value,sys_created_by,sys_created_on&sysparm_display_value=true&sysparm_limit=1000`,
+        { credentials: "include", headers },
+      );
+      if (!response.ok) return comments;
+      const json = await response.json();
+      for (const row of Array.isArray(json?.result) ? json.result : []) {
+        const element = String(row?.element || "").trim();
+        if (element !== "comments" && element !== "work_notes") continue;
+        const author = String(row?.sys_created_by || "").trim();
+        const text = String(row?.value || "").trim();
+        if (!text && !author) continue;
+        comments.push({
+          kind: element,
+          author,
+          createdAt: String(row?.sys_created_on || "").trim(),
+          text,
+        });
+      }
+    } catch {
+      // leave this incident's comments empty
+    }
+    return comments;
+  };
+
+  // Fetched in parallel but written back into their original slots so the
+  // caller's position-based lookup still matches the requested ids.
+  const groups = new Array(idList.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < idList.length) {
+      const index = next++;
+      groups[index] = {
+        id: String(idList[index]),
+        comments: await fetchIncident(idList[index]),
+      };
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(4, idList.length) }, worker),
+  );
+  return groups;
+}
+
+// Runs fetchSparkCommentsInPage in the current tab. Spark's Table API only
+// authenticates from the page's own context (MAIN world) — the CSRF token
+// (window.g_ck) lives there, and an isolated-world fetch would fire the
+// Basic-auth challenge. Prefers the frame that actually returned comments.
+export async function fetchSparkCommentsInTab(ids) {
+  const currentTab = await getCurrentTab();
+  const idList = Array.isArray(ids) ? ids : [ids];
+
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: currentTab.id, allFrames: true },
+    func: fetchSparkCommentsInPage,
+    args: [idList],
+    world: "MAIN",
+  });
+
+  const outs = results.map((r) => r.result).filter(Boolean);
+  return (
+    outs.find((g) => g.some((x) => x.comments?.length > 0)) ||
+    outs.find((g) => g.length > 0) ||
+    []
+  );
+}
+
+export {
+  getPageData,
+  detectSiteInTab,
+  scrapeInPage,
+  listTicketAttachmentsInPage,
+  listListingAttachmentsInPage,
+  scrapeSelectedListingInPage,
+  scrapeSelectedSparkListingInPage,
+  fetchListingDetailsInPage,
+  fetchSparkCommentsInPage,
+};

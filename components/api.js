@@ -418,6 +418,62 @@ async function listIssueAttachments(jiraBaseUrl, issueKey) {
   return Array.isArray(attachments) ? attachments.map((a) => a.filename) : [];
 }
 
+// Lists an issue's existing comment bodies (plain text). Used to dedupe
+// source comments on re-runs so a sync never duplicates what's already there.
+async function listJiraComments(jiraBaseUrl, issueKey) {
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?maxResults=5000`,
+  );
+  if (!response.ok) {
+    throw new Error(`Couldn't list comments (status ${response.status}).`);
+  }
+  const data = await response.json();
+  const comments = Array.isArray(data?.comments) ? data.comments : [];
+  return comments.map((c) => (typeof c?.body === "string" ? c.body : ""));
+}
+
+// Adds one plain-text comment to a Jira issue. Each source journal entry
+// becomes its own comment — never merged with the others. The request is not
+// retried on HTTP statuses (a re-send could duplicate the comment); only the
+// network-level drop is retried once.
+async function addJiraComment(jiraBaseUrl, issueKey, body) {
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Atlassian-Token": "no-check",
+      },
+      body: JSON.stringify({ body }),
+    },
+    { retryStatus: false },
+  );
+
+  if (response.status === 401 || response.status === 403) {
+    const sessionValid = await isJiraLoggedIn(jiraBaseUrl);
+    if (sessionValid) {
+      throw new Error("Invalid project key or you don't have access.");
+    }
+    redirectToLogin(jiraBaseUrl, "");
+    throw new Error("Jira session expired. Please login again.");
+  }
+
+  const responseData = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    const message =
+      responseData?.errorMessages?.join(", ") ||
+      responseData?.errors?.body ||
+      "Comment creation failed.";
+    throw new Error(message);
+  }
+
+  return responseData;
+}
+
 export {
   isJiraLoggedIn,
   validateProject,
@@ -426,4 +482,6 @@ export {
   uploadJiraAttachment,
   updateJiraIssueDescription,
   listIssueAttachments,
+  listJiraComments,
+  addJiraComment,
 };
