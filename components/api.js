@@ -409,6 +409,42 @@ async function listJiraComments(jiraBaseUrl, issueKey) {
   });
 }
 
+async function listJiraCommentsDetailed(jiraBaseUrl, issueKey) {
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment?maxResults=5000`,
+  );
+  if (!response.ok) {
+    throw new Error(`Couldn't list comments (status ${response.status}).`);
+  }
+  const data = await response.json();
+  const comments = Array.isArray(data?.comments) ? data.comments : [];
+  return comments
+    .map((c) => ({
+      id: String(c?.id || ""),
+      author: c?.author?.displayName || "",
+      created: c?.created || "",
+      body:
+        typeof c?.body === "string"
+          ? c.body
+          : c?.body && typeof c.body === "object"
+            ? adfToText(c.body).trim()
+            : "",
+    }))
+    .filter((c) => c.id && c.body);
+}
+
+async function getJiraIssue(jiraBaseUrl, issueKey) {
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=description,summary`,
+  );
+  if (!response.ok) {
+    throw new Error(`Couldn't fetch issue (status ${response.status}).`);
+  }
+  return response.json();
+}
+
 async function addJiraComment(jiraBaseUrl, issueKey, body) {
   const response = await jiraFetch(
     jiraBaseUrl,
@@ -455,5 +491,7 @@ export {
   updateJiraIssueDescription,
   listIssueAttachments,
   listJiraComments,
+  listJiraCommentsDetailed,
+  getJiraIssue,
   addJiraComment,
 };

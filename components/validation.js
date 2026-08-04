@@ -50,17 +50,18 @@ export function parseJiraIssueUrl(value) {
 
   if (url.protocol !== "https:") return null;
 
-  const browse = /^\/browse\/([A-Z][A-Z0-9]{1,})-(\d+)\/?$/i.exec(
+  const browse = /\/browse\/([A-Za-z0-9]+-\d+)(?:[/?#]|$)/i.exec(
     url.pathname,
   );
   if (browse) {
+    const key = browse[1].toUpperCase();
     return {
       origin: url.origin,
-      projectKey: browse[1].toUpperCase(),
+      projectKey: key.replace(/-\d+$/, ""),
     };
   }
 
-  const board = /\/projects\/([A-Z][A-Z0-9]+)\/boards\/\d+\/?$/i.exec(
+  const board = /\/projects\/([A-Za-z0-9]+)\/boards?\/(?:\d+|backlog)?(?:[/?#]|$)/i.exec(
     url.pathname,
   );
   if (board) {
@@ -68,6 +69,34 @@ export function parseJiraIssueUrl(value) {
       origin: url.origin,
       projectKey: board[1].toUpperCase(),
     };
+  }
+
+  const project = /\/projects\/([A-Za-z0-9]+)(?:[/?#]|$)/i.exec(
+    url.pathname,
+  );
+  if (project) {
+    return {
+      origin: url.origin,
+      projectKey: project[1].toUpperCase(),
+    };
+  }
+
+  if (/\/secure\/RapidBoard\.jspa\b/i.test(url.pathname)) {
+    const pk = /[?&]projectKey=([A-Za-z0-9]+)/i.exec(url.search);
+    if (pk) {
+      return {
+        origin: url.origin,
+        projectKey: pk[1].toUpperCase(),
+      };
+    }
+  }
+
+  const jiraHost =
+    url.hostname.endsWith("atlassian.net") ||
+    /(^|\.)jira[.\-]/.test(url.hostname) ||
+    url.hostname === "jira";
+  if (jiraHost && /\/issues\/?(?:[/?#]|$)/i.test(url.pathname)) {
+    return { origin: url.origin, projectKey: null };
   }
 
   return null;
@@ -78,7 +107,7 @@ export function extractJiraIssueDetailsFromBaseUrl() {
   if (!parsed) return false;
 
   jiraBaseUrlInput.value = parsed.origin;
-  if (projectKeyInput.value !== parsed.projectKey) {
+  if (parsed.projectKey && projectKeyInput.value !== parsed.projectKey) {
     projectKeyInput.value = parsed.projectKey;
   }
   return true;

@@ -55,6 +55,7 @@ export default [
         performance: "readonly",
         XMLHttpRequest: "readonly",
         DOMException: "readonly",
+        Event: "readonly",
         atob: "readonly",
         GlideRecord: "readonly",
         CSS: "readonly",

@@ -18,6 +18,7 @@ import { getJiraContext } from "./validation.js";
 import { saveSettings, saveProjectHistory } from "./storage.js";
 import { formatBytes } from "./util.js";
 import { getPageData, detectSiteInTab, fetchSparkCommentsInTab } from "./scrape.js";
+import { detectJiraIssueInTab, syncJiraCommentsToSpark } from "./jira-to-spark.js";
 import {
   isJiraLoggedIn,
   validateProject,
@@ -82,6 +83,14 @@ export async function createTicket() {
     if (!pageData?.title) {
 
       const detected = await detectSiteInTab().catch(() => null);
+      const jiraIssue = await detectJiraIssueInTab().catch(() => null);
+      if (jiraIssue?.key) {
+        setStatus(
+          `Jira issue ${jiraIssue.key} detected — use the "Sync Jira comments to Spark" button instead of Create Ticket.`,
+          "info",
+        );
+        return;
+      }
 
       setStatus(
         detected
@@ -218,7 +227,24 @@ export async function createTicket() {
         finalStatus = `${finalStatus} ${commentSync.added} comment(s) synced.`;
       }
 
-      setStatus(finalStatus, finalStatusType);
+      let backSyncText = "";
+      try {
+        setStatus(
+          `Syncing ${existing.issue.key} comments back to Spark...`,
+          "loading",
+        );
+        const { report } = await syncJiraCommentsToSpark({
+          jiraOrigin,
+          issueKey: existing.issue.key,
+        });
+        if (report.posted > 0) {
+          backSyncText = ` ${report.posted} Jira comment(s) synced back to Spark.`;
+        } else if (report.failed > 0) {
+          backSyncText = ` ${report.failed} Jira comment(s) failed to sync back to Spark.`;
+        }
+      } catch {}
+
+      setStatus(`${finalStatus}${backSyncText}`, finalStatusType);
       renderTicketCard(existing.issue.key, issueUrl);
       saveProjectHistory(projectKey);
       return;

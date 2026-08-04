@@ -23,6 +23,9 @@ export async function syncSparkComments(jiraOrigin, issueKey, entries) {
     );
     let added = 0;
     for (const entry of entries) {
+      if (/^\[Jira comment\]/i.test(String(entry.text || "").trim())) {
+        continue;
+      }
       const header = sparkCommentHeader(entry);
       if (known.has(header)) {
         continue;

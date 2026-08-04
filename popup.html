@@ -70,7 +70,7 @@
       </div>
     </section>
 
-    <section class="field-block field-block-attachments">
+    <section class="field-block field-block-attachments" id="singleAttachments">
       <label class="attach-toggle" for="includeAttachments">
         <input id="includeAttachments" type="checkbox" />
         <span class="attach-toggle-label">
@@ -98,7 +98,13 @@
       <button id="createTicket" type="button">
         <span class="btn-spinner" aria-hidden="true"></span>
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 11a8 8 0 0 0-15-3.7L3 9.5M3 4.5v5h5M4 13a8 8 0 0 0 15 3.7l2-2.2M21 19.5v-5h-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span class="btn-label">Create or Sync ticket</span>
+        <span class="btn-label" id="createTicketLabel">Create or Sync ticket</span>
+      </button>
+
+      <button id="jiraToSparkSync" class="btn-ghost" type="button" style="display: none;">
+        <span class="btn-spinner" aria-hidden="true"></span>
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="btn-label">Sync updates</span>
       </button>
 
       <button id="openWebsite" class="btn-ghost" type="button" style="display: none;">

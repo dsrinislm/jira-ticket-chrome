@@ -12,6 +12,9 @@ export const jiraBaseUrlInput = el("jiraBaseUrl");
 export const jiraBaseUrlError = el("jiraBaseUrlError");
 export const projectKeyInput = el("projectKey");
 export const createTicketBtn = el("createTicket");
+export const createTicketLabel = el("createTicketLabel");
+export const singleAttachments = el("singleAttachments");
+export const jiraToSparkSyncBtn = el("jiraToSparkSync");
 export const sourceSiteSwitch = el("sourceSiteSwitch");
 export const sourceSiteInput = el("sourceSiteInput");
 export const sourceSiteLabels = document.querySelectorAll(".site-toggle-label");
@@ -790,6 +793,8 @@ export function setBusy(isBusy) {
   singleBusy = Boolean(isBusy);
   createTicketBtn.disabled = isBusy;
   createTicketBtn.dataset.loading = isBusy ? "true" : "false";
+  jiraToSparkSyncBtn.disabled = isBusy;
+  jiraToSparkSyncBtn.dataset.loading = isBusy ? "true" : "false";
   jiraBaseUrlInput.disabled = isBusy;
   projectKeyInput.disabled = isBusy;
   includeAttachmentsInput.disabled = isBusy;
@@ -897,6 +902,11 @@ export function setSingleTabEnabled(enabled) {
   if (!isEnabled && bulkView.hidden) {
     switchView("bulk", false);
   }
+}
+
+export function setJiraToSparkVisible(visible) {
+  if (!jiraToSparkSyncBtn) return;
+  jiraToSparkSyncBtn.style.display = visible ? "block" : "none";
 }
 
 export function updateBulkStatusMessage() {

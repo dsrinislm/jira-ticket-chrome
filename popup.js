@@ -10,12 +10,15 @@ import {
   bulkView,
   singleView,
   createTicketBtn,
+  createTicketLabel,
+  singleAttachments,
   sourceSiteInput,
   sourceSiteLabels,
   setSourceSite,
   setSourceSiteLocked,
   setSourceSiteVisible,
   setSingleTabEnabled,
+  setBusy,
   setStatus,
   switchView,
   toggleSelectAll,
@@ -58,6 +61,8 @@ import {
   bulkAttachmentGroups,
   bulkAttachmentSelectAll,
   bulkIncludeAttachments,
+  jiraToSparkSyncBtn,
+  setJiraToSparkVisible,
 } from "./components/ui.js";
 import { debounce } from "./components/util.js";
 import {
@@ -91,8 +96,15 @@ import {
   requestAbort,
 } from "./components/bulk-import.js";
 import { requestUploadCancel } from "./components/attachments.js";
+import {
+  detectJiraIssueInTab,
+  detectJiraPageInTab,
+  syncJiraUpdates,
+} from "./components/jira-to-spark.js";
 
 const debouncedSaveSettings = debounce(saveSettings, 300);
+
+let jiraFlowActive = false;
 
 loadInitialState();
 startGapArt();
@@ -166,7 +178,66 @@ function resetSinglePromptIfIncomplete() {
     }
   }),
 );
-createTicketBtn.addEventListener("click", createTicket);
+createTicketBtn.addEventListener("click", () => {
+  if (jiraFlowActive) {
+    runSyncUpdates();
+  } else {
+    createTicket();
+  }
+});
+
+jiraToSparkSyncBtn.addEventListener("click", runSyncUpdates);
+
+async function runSyncUpdates() {
+  const ctx = getJiraContext();
+  const issue = await detectJiraIssueInTab().catch(() => null);
+  if (!ctx) return;
+  if (!issue?.key) {
+    setStatus("Open a Jira ticket to sync its updates with Spark.", "info");
+    return;
+  }
+  if (ctx.jiraOrigin !== issue.origin) {
+    setStatus(
+      `This Jira (${issue.origin}) doesn't match the configured base URL (${ctx.jiraOrigin}). Update the Jira base URL and retry.`,
+      "error",
+    );
+    return;
+  }
+
+  setBusy(true);
+  try {
+    setStatus(`Syncing updates for ${issue.key}...`, "loading");
+    const { report, sparkToJira } = await syncJiraUpdates({
+      jiraOrigin: ctx.jiraOrigin,
+      issueKey: issue.key,
+    });
+    const via = String(report.mode || "").startsWith("spark tab")
+      ? " (via Spark tab)"
+      : "";
+    const bits = [];
+    if (report.posted > 0) {
+      bits.push(`${report.posted} Jira comment(s) synced to Spark`);
+    } else if (report.failed > 0) {
+      bits.push(`${report.failed} Jira comment(s) failed to sync to Spark`);
+    } else {
+      bits.push("Jira comments up to date in Spark");
+    }
+    if (sparkToJira?.added > 0) {
+      bits.push(`${sparkToJira.added} Spark comment(s) synced to Jira`);
+    } else {
+      bits.push("Spark comments up to date in Jira");
+    }
+    const failed = report.failed > 0;
+    setStatus(
+      `${issue.key}: ${bits.join("; ")}${via}.${failed && report.detail ? ` ${report.detail}` : ""}`,
+      failed ? "error" : "success",
+    );
+  } catch (error) {
+    setStatus(error.message || "Failed to sync updates.", "error");
+  } finally {
+    setBusy(false);
+  }
+}
 
 includeAttachmentsInput.addEventListener("change", async () => {
   if (!getIncludeAttachments()) {
@@ -426,33 +497,105 @@ sourceSiteLabels.forEach((label) =>
   }),
 );
 
+function configuredJiraOrigin() {
+  const raw = jiraBaseUrlInput.value.trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return null;
+  }
+}
+
+function syncJiraContextFromTab(info) {
+  let changed = false;
+  if (info.origin && jiraBaseUrlInput.value.trim() !== info.origin) {
+    jiraBaseUrlInput.value = info.origin;
+    changed = true;
+  }
+  const currentKey = projectKeyInput.value.trim().toUpperCase();
+  if (info.projectKey && currentKey !== info.projectKey) {
+    projectKeyInput.value = info.projectKey;
+    changed = true;
+  }
+  if (changed) {
+    clearJiraBaseUrlErrorIfNowValid();
+    extractJiraIssueDetailsFromBaseUrl();
+  }
+}
+
 async function applyDetectedState() {
 
   setSyncedTicketFound(false);
   resetTicketCard();
 
+  const jiraPage = await detectJiraPageInTab().catch(() => null);
+  const jiraIssue = jiraPage?.key ? jiraPage : null;
+  const onJira = Boolean(jiraIssue?.key);
+  const onConfiguredJira = onJira && configuredJiraOrigin() === jiraIssue.origin;
+
   let site = null;
   let listing = null;
   let selectedCount = 0;
-  try {
-    ({ site, listing, selectedCount } = await detectTabState());
-  } catch {
-    setSourceSiteVisible(false);
-    setSingleTabEnabled(false);
-    applyListingState(null, 0);
-    return;
+  if (!jiraPage) {
+    try {
+      ({ site, listing, selectedCount } = await detectTabState());
+    } catch {
+      setSourceSiteVisible(false);
+      setSingleTabEnabled(false);
+      setJiraToSparkVisible(false);
+      createTicketBtn.hidden = false;
+      applyListingState(null, 0);
+      return;
+    }
   }
 
   const matched = site !== null && listing === null;
-  setSingleTabEnabled(matched);
+
+  if (jiraPage) {
+    syncJiraContextFromTab(jiraPage);
+  }
+  const onSyncFlow = Boolean(
+    jiraPage && (jiraPage.type === "ticket" || jiraPage.type === "filter"),
+  );
+  const isTicketContext = matched || onSyncFlow;
+  tabSingle.hidden = !isTicketContext;
+  setSingleTabEnabled(isTicketContext);
 
   if (matched) setSourceSite(site);
   setSourceSiteVisible(matched);
   setSourceSiteLocked(matched);
 
+  setJiraToSparkVisible(false);
+  jiraFlowActive = onSyncFlow;
+  singleAttachments.hidden = Boolean(jiraPage);
+  createTicketLabel.textContent = jiraFlowActive
+    ? "Sync Updates"
+    : "Create or Sync ticket";
+  createTicketBtn.hidden = Boolean(jiraPage) && !jiraFlowActive;
+  if (jiraFlowActive && !bulkView.hidden) {
+    switchView("single", false);
+  }
+
   applyListingState(listing, selectedCount);
   if (!bulkView.hidden) {
     updateBulkStatusMessage();
+  } else if (onJira) {
+    setStatus(
+      onConfiguredJira
+        ? `Jira issue ${jiraIssue.key} detected — sync its comments back to Spark.`
+        : `Jira issue ${jiraIssue.key} detected — set the Jira base URL to this Jira to sync its comments back to Spark.`,
+      "info",
+    );
+  } else if (jiraPage) {
+    setStatus(
+      jiraPage.type === "filter"
+        ? "Jira filter detected — base URL set."
+        : jiraPage.projectKey
+          ? `Jira project ${jiraPage.projectKey} detected — base URL and project key set.`
+          : "Jira page detected — base URL set.",
+      "info",
+    );
   } else {
 
     refreshSingleViewStatus();

@@ -1791,6 +1791,249 @@ export async function fetchSparkCommentsInTab(ids) {
   return best;
 }
 
+function postJiraCommentsInSparkPage({ sysId, jiraOrigin, issueKey, comments }) {
+  const userToken =
+    (typeof window !== "undefined" && window.g_ck) ||
+    document.querySelector('meta[name="X-UserToken"]')?.content ||
+    document.querySelector('input[name="X-UserToken"]')?.value ||
+    "";
+
+  const markerOf = (c) =>
+    `${jiraOrigin}/browse/${issueKey}?focusedCommentId=${c.id}`;
+  const commentText = (c) =>
+    `[Jira comment] ${c.author || "unknown"} · ${c.created || ""}\n${markerOf(c)}\n\n${c.body}`;
+
+  const findWorkNotesComposer = () =>
+    document.querySelector('textarea[data-stream-text-input="work_notes"]') ||
+    document.querySelector("#activity-stream-work_notes-textarea");
+
+  const findWorkNotesField = () =>
+    document.querySelector(
+      'textarea[name$=".work_notes"], textarea[name="work_notes"]',
+    );
+
+  const setFieldValue = (el, text) => {
+    let applied = false;
+    const ng = window.angular;
+    if (ng && ng.element) {
+      try {
+        const elt = ng.element(el);
+        const scope = elt.scope();
+        if (scope) {
+          scope.$apply(() => {
+            const model = elt.controller
+              ? elt.controller("ngModel")
+              : null;
+            if (model && typeof model.$setViewValue === "function") {
+              model.$setViewValue(text);
+            } else {
+              el.value = text;
+            }
+          });
+          applied = true;
+        }
+      } catch {}
+    }
+    if (!applied) {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(el, text);
+    }
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  const findPostButton = (composer) => {
+    const isMatch = (el) =>
+      /saveActivity|postActivity|postComment|submit|Add comment|Post/i.test(
+        (el.getAttribute("ng-click") || "") +
+          (el.getAttribute("aria-label") || "") +
+          (el.textContent || ""),
+      );
+    const scan = (root) => {
+      const nodes = [
+        ...root.querySelectorAll(
+          "button, a, input[type='submit'], [ng-click]",
+        ),
+      ];
+      return nodes.find(isMatch) || null;
+    };
+    let node = composer.parentElement;
+    for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+      const btn = scan(node);
+      if (btn) return btn;
+    }
+    return scan(document) || null;
+  };
+
+  const postViaComposer = async (c) => {
+    const composer = findWorkNotesComposer();
+    if (!composer) return { ok: false, stage: "composer:none", btn: "" };
+    const text = commentText(c);
+    setFieldValue(composer, text);
+    composer.focus();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    let invoked = "click";
+    const ng = window.angular;
+    if (ng && ng.element) {
+      try {
+        const scope = ng.element(composer).scope();
+        const modelExpr = composer.getAttribute("ng-model") || "";
+        const objName = modelExpr.split(".")[0];
+        if (scope && objName && scope[objName]) {
+          const field = scope[objName];
+          field.value = text;
+          const fns = [
+            "saveActivity",
+            "postActivity",
+            "postComment",
+            "saveStreamActivity",
+            "submit",
+          ];
+          const fnName = fns.find((n) => typeof scope[n] === "function");
+          if (fnName) {
+            scope.$apply(() => scope[fnName](field));
+            invoked = `scope:${fnName}`;
+          }
+        }
+      } catch {}
+    }
+
+    if (invoked === "click") {
+      const button = findPostButton(composer);
+      if (!button) return { ok: false, stage: "composer:no-button", btn: "" };
+      button.disabled = false;
+      button.click();
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    const bodyHtml = document.body?.innerHTML || "";
+    const streamText =
+      composer
+        .closest(
+          "[data-stream-form], .sn-activity-stream, .sc-activity-stream-comments, .sn-activity-stream-comments",
+        )
+        ?.innerText || "";
+    const found = (
+      streamText +
+      (document.body?.innerText || "") +
+      bodyHtml
+    ).includes(markerOf(c));
+    return {
+      ok: found,
+      stage: found
+        ? `composer:ok:${invoked}`
+        : `composer:unverified:${invoked}`,
+      btn: findPostButton(composer)?.getAttribute("ng-click") || "",
+    };
+  };
+
+  return (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const collectTexts = () => {
+      const parts = [
+        document.body?.innerText || "",
+        document.body?.innerHTML || "",
+      ];
+      const field = findWorkNotesField();
+      if (field?.value) parts.push(field.value);
+      const composer = findWorkNotesComposer();
+      if (composer) {
+        if (composer.value) parts.push(composer.value);
+        const container = composer.closest(
+          "[data-stream-form], .sn-activity-stream, .sc-activity-stream-comments, .sn-activity-stream-comments",
+        );
+        if (container?.innerText) parts.push(container.innerText);
+      }
+      return parts.join("\n");
+    };
+    const streamHasEntries = () =>
+      document.querySelector(
+        "[data-journal-id], [data-entry-id], [data-stream-entry], .sn-activity-stream-entry, .activity-stream-entry, .sc-activity-stream-entry",
+      ) !== null;
+    let existingText = collectTexts();
+    let serverText = "";
+    let serverEntries = 0;
+    try {
+      const groups = await fetchSparkCommentsInPage([sysId]);
+      serverEntries = groups[0]?.comments?.length || 0;
+      serverText = (groups[0]?.comments || [])
+        .map((e) => e.text || "")
+        .join("\n");
+    } catch {}
+    if (!serverEntries) {
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline) {
+        existingText = collectTexts();
+        if (comments.some((c) => existingText.includes(markerOf(c)))) break;
+        if (streamHasEntries()) break;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+    const dedupText = `${serverText}\n${existingText}`;
+    const existing = comments.filter((c) =>
+      dedupText.includes(markerOf(c)),
+    );
+    const pending = comments.filter((c) => !existing.includes(c));
+    const failedIds = new Set();
+    const stages = [];
+    const composerBtns = [];
+
+    for (const c of pending) {
+      try {
+        const res = await postViaComposer(c);
+        stages.push(res.stage);
+        if (res.btn) composerBtns.push(res.btn);
+        if (!res.ok) failedIds.add(c.id);
+      } catch {
+        failedIds.add(c.id);
+      }
+    }
+
+    const skipped = comments.length - pending.length;
+    const hasFields = Boolean(findWorkNotesComposer() || findWorkNotesField());
+    const probe = {
+      noteTextareas:
+        [...document.querySelectorAll("textarea")]
+          .map((t) => t.name || t.id || "?")
+          .filter((n) => /comments|work_notes|note|activity/i.test(n))
+          .slice(0, 6)
+          .join("|") || "none",
+      workNotesFields: document.querySelectorAll(
+        'textarea[name$=".work_notes"], input[name$=".work_notes"], [name="work_notes"]',
+      ).length,
+      readonlyWorkNotes: document.querySelectorAll(
+        '[name$=".work_notes"][readonly], [id$="work_notes"][readonly]',
+      ).length,
+    };
+    const detail = [
+      `token=${userToken ? "yes" : "no"}`,
+      `existing=${existing.length}`,
+      `server_entries=${serverEntries}`,
+      `url=${location.href}`,
+      `title=${document.title}`,
+      `note_textareas=${probe.noteTextareas}`,
+      `wn_fields=${probe.workNotesFields}`,
+      `wn_readonly=${probe.readonlyWorkNotes}`,
+      `stages=${stages.join(",") || "none"}`,
+      `composer_btn=${[...new Set(composerBtns)].join(" | ").slice(0, 80) || "none"}`,
+      `posted=${pending.length - failedIds.size}/${pending.length}`,
+      `marker_in_body=${comments.length ? (document.body?.innerText || "").includes(markerOf(comments[0])) ? "yes" : "no" : "?"}`,
+    ].join(", ");
+    return {
+      posted: pending.length - failedIds.size,
+      failed: failedIds.size,
+      skipped,
+      total: comments.length,
+      hasFields,
+      detail,
+    };
+  })();
+}
+
 export {
   getPageData,
   detectSiteInTab,
@@ -1801,4 +2044,5 @@ export {
   scrapeSelectedSparkListingInPage,
   fetchListingDetailsInPage,
   fetchSparkCommentsInPage,
+  postJiraCommentsInSparkPage,
 };

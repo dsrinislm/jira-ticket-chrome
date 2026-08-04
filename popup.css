@@ -550,6 +550,21 @@ button:disabled {
   opacity: 0.9;
 }
 
+#jiraToSparkSync[data-loading="true"] .btn-icon {
+  display: none;
+}
+
+#jiraToSparkSync[data-loading="true"] .btn-spinner {
+  display: inline-block;
+  border-color: var(--accent-100);
+  border-top-color: var(--accent);
+}
+
+#jiraToSparkSync:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

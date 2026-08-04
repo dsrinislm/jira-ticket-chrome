@@ -55,6 +55,66 @@ export function buildIssueDescription(sourceUrl, description) {
   };
 }
 
+function nodeText(node) {
+  if (!node || typeof node !== "object") return "";
+  if (typeof node.text === "string") return node.text;
+  if (!Array.isArray(node.content)) return "";
+  return node.content.map(nodeText).join("");
+}
+
+function findLinkInNode(node, depth = 0) {
+  if (!node || typeof node !== "object" || depth > 8) return null;
+  if (
+    typeof node.text === "string" &&
+    Array.isArray(node.marks) &&
+    node.marks.some((m) => m?.type === "link")
+  ) {
+    const href = node.marks.find((m) => m.type === "link")?.attrs?.href;
+    if (typeof href === "string" && /^https?:\/\//i.test(href)) return href;
+  }
+  if (!Array.isArray(node.content)) return null;
+  for (const child of node.content) {
+    const found = findLinkInNode(child, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findSourceUrlInDoc(doc) {
+  if (!doc || doc.type !== "doc" || !Array.isArray(doc.content)) return null;
+  const content = doc.content;
+  for (let i = 0; i < content.length; i++) {
+    const node = content[i];
+    if (
+      node.type === "heading" &&
+      /source ticket url/i.test(nodeText(node))
+    ) {
+      for (let j = i + 1; j < content.length; j++) {
+        const next = content[j];
+        if (next.type === "heading") break;
+        const link = findLinkInNode(next);
+        if (link) return link;
+      }
+      return null;
+    }
+  }
+  for (const node of content) {
+    const link = findLinkInNode(node);
+    if (link) return link;
+  }
+  return null;
+}
+
+export function extractSourceUrl(descriptionAdf) {
+  const url = findSourceUrlInDoc(descriptionAdf);
+  if (!url) return null;
+  try {
+    return new URL(url).href;
+  } catch {
+    return null;
+  }
+}
+
 export function dataUrlToBlob(dataUrl) {
   const [header, base64] = dataUrl.split(",");
   const mime =
