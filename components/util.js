@@ -9,11 +9,28 @@ export function debounce(fn, delay) {
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const i = Math.min(
-    units.length - 1,
-    Math.floor(Math.log(bytes) / Math.log(1024)),
-  );
-  return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+  const n = Number(bytes);
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = n;
+  let unit = "B";
+  for (const u of units) {
+    size /= 1024;
+    unit = u;
+    if (size < 1024) break;
+  }
+  const precision = size < 10 ? 1 : 0;
+  return `${Number(size.toFixed(precision))} ${unit}`;
+}
+
+const HTML_ESCAPES = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+};
+
+export function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 }

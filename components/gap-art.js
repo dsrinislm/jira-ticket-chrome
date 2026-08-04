@@ -73,21 +73,27 @@ function update(scene) {
 
 let rafId = 0;
 let running = false;
+let lastPaintTime = 0;
+const FRAME_INTERVAL_MS = 1000 / 30;
 
-function frame() {
+function frame(now) {
   if (!running) return;
-  for (const scene of scenes) {
-    const visible = scene.canvas.clientWidth > 0 && scene.canvas.clientHeight > 0;
-    if (!visible) continue;
-    if (
-      scene.canvas.clientWidth !== scene.width ||
-      scene.canvas.clientHeight !== scene.height
-    ) {
-      resize(scene);
-      paint(scene);
-    } else if (!reducedMotion) {
-      update(scene);
-      paint(scene);
+  if (now - lastPaintTime >= FRAME_INTERVAL_MS) {
+    lastPaintTime = now;
+    for (const scene of scenes) {
+      const visible =
+        scene.canvas.clientWidth > 0 && scene.canvas.clientHeight > 0;
+      if (!visible) continue;
+      if (
+        scene.canvas.clientWidth !== scene.width ||
+        scene.canvas.clientHeight !== scene.height
+      ) {
+        resize(scene);
+        paint(scene);
+      } else if (!reducedMotion) {
+        update(scene);
+        paint(scene);
+      }
     }
   }
   rafId = requestAnimationFrame(frame);

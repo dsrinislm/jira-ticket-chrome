@@ -58,7 +58,8 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
 
   cancelRequested = false;
 
-  const totalBytes = images.reduce((sum, img) => sum + dataUrlSize(img.dataUrl), 0);
+  const imageSizes = images.map((img) => dataUrlSize(img.dataUrl));
+  const totalBytes = imageSizes.reduce((sum, size) => sum + size, 0);
   let uploadedBytes = 0;
 
   const report = (loaded) => {
@@ -75,7 +76,8 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
 
   const uploadOne = async () => {
     while (next < images.length && !cancelRequested) {
-      const img = images[next++];
+      const index = next++;
+      const img = images[index];
       const filename = imageUploadFilename(img);
 
       const fileBase = uploadedBytes;
@@ -101,7 +103,7 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
         if (!firstError) firstError = err.message || String(err);
         failedImages.push(img);
         }
-      uploadedBytes += dataUrlSize(img.dataUrl);
+      uploadedBytes += imageSizes[index];
       report();
     }
   };

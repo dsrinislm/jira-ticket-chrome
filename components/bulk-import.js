@@ -81,7 +81,10 @@ async function runBulkWorkerPool(total, runItem) {
     }
   };
 
-  await worker();
+  const POOL = 2;
+  await Promise.all(
+    Array.from({ length: Math.min(POOL, total) }, worker),
+  );
 
   return { counters, completed: progress.completed };
 }

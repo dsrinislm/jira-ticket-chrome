@@ -1,3 +1,5 @@
+import { formatBytes, escapeHtml } from "./util.js";
+
 const el = (id) => document.getElementById(id);
 
 export const statusDiv = el("status");
@@ -150,21 +152,6 @@ export function refreshSingleViewStatus() {
 
 const ATTACHMENT_GROUP_LABELS = { video: "Video", image: "Image", other: "Other" };
 
-function formatBytes(bytes) {
-  const n = Number(bytes);
-  if (!Number.isFinite(n) || n <= 0) return "";
-  if (n < 1024) return `${n} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let size = n;
-  let unit = "B";
-  for (const u of units) {
-    size /= 1024;
-    unit = u;
-    if (size < 1024) break;
-  }
-  return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
-}
-
 export function renderAttachmentPicker(items, syncedNames = new Set()) {
   attachmentPicker.hidden = false;
   expandAttachmentPicker(attachmentPicker);
@@ -195,7 +182,7 @@ export function renderAttachmentPicker(items, syncedNames = new Set()) {
 
     const title = document.createElement("div");
     title.className = "attachment-group-title";
-    title.textContent = `${ATTACHMENT_GROUP_LABELS[type]} (${list.length})${groupSize ? ` · ${groupSize}` : ""}`;
+    title.textContent = `${ATTACHMENT_GROUP_LABELS[type]} (${list.length})${groupSize && groupSize !== "0 B" ? ` · ${groupSize}` : ""}`;
     group.appendChild(title);
 
     for (const item of list) {
@@ -476,7 +463,7 @@ export function renderBulkAttachmentPicker(groups, labels = {}, syncedMap = {}) 
     });
 
     const titleText = document.createElement("span");
-    titleText.textContent = `${labels[ticketId] || group.id} (${files.length})${totalSize ? ` · ${totalSize}` : ""}`;
+    titleText.textContent = `${labels[ticketId] || group.id} (${files.length})${totalSize && totalSize !== "0 B" ? ` · ${totalSize}` : ""}`;
     title.append(groupCheckbox, titleText);
     block.appendChild(title);
 
@@ -656,7 +643,7 @@ function refreshBulkGroupTitle(ticketId) {
   if (!titleText) return;
   const count = Number(block.dataset.count || 0);
   const size = block.dataset.size || "";
-  titleText.textContent = `${block.dataset.title || ticketId} (${count})${size ? ` · ${size}` : ""}`;
+  titleText.textContent = `${block.dataset.title || ticketId} (${count})${size && size !== "0 B" ? ` · ${size}` : ""}`;
 }
 
 export function markBulkRowsFullySynced(fullySyncedIds) {
@@ -768,17 +755,7 @@ export const state = {
   bulkAttachmentSelection: null,
 };
 
-const HTML_ESCAPES = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  '"': "&quot;",
-  "'": "&#39;",
-};
-
-export function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
-}
+export { escapeHtml } from "./util.js";
 
 export function setStatus(message, status = "info") {
   statusText.textContent = message;

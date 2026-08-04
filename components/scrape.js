@@ -1029,11 +1029,20 @@ function detectTabStateInPage(sites) {
   return { site, listing, selectedCount };
 }
 
+const TAB_STATE_CACHE_TTL_MS = 500;
+const tabStateCache = new Map();
+
 export async function detectTabState() {
   const currentTab = await getCurrentTab();
   const url = (currentTab?.url || "").trim();
   if (url && !/^https?:\/\//i.test(url)) {
     return { site: null, listing: null };
+  }
+
+  const cacheKey = `${currentTab.id}|${url}`;
+  const cached = tabStateCache.get(cacheKey);
+  if (cached && Date.now() - cached.time < TAB_STATE_CACHE_TTL_MS) {
+    return cached.value;
   }
 
   try {
@@ -1046,11 +1055,22 @@ export async function detectTabState() {
     const site = results.map((r) => r.result?.site).find(Boolean) || null;
     const found =
       results.map((r) => r.result).find((r) => r && r.listing) || null;
-    return {
+    const value = {
       site,
       listing: found ? found.listing : null,
       selectedCount: found ? found.selectedCount || 0 : 0,
     };
+
+    tabStateCache.set(cacheKey, { time: Date.now(), value });
+    if (tabStateCache.size > 20) {
+      for (const [key, entry] of tabStateCache) {
+        if (Date.now() - entry.time > TAB_STATE_CACHE_TTL_MS) {
+          tabStateCache.delete(key);
+        }
+      }
+    }
+
+    return value;
   } catch {
     return { site: null, listing: null };
   }
