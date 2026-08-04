@@ -116,6 +116,14 @@ body {
   line-height: 1.15;
 }
 
+.app-header h1 .brand {
+   background: linear-gradient(135deg, var(--accent-strong) 0%, var(--accent) 55%, #a49bff 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
+}
+
 /* Fields */
 
 .field-block {
