@@ -46,8 +46,15 @@ async function syncSparkCommentsForTicket(jiraOrigin, issueKey, pageData) {
   }
   const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(pageData.url || "");
   if (!sysIdMatch) return { added: 0, total: 0 };
-  const groups = await fetchSparkCommentsInTab([sysIdMatch[1]]).catch(() => []);
-  return syncSparkComments(jiraOrigin, issueKey, groups[0]?.comments || []);
+  const groups = await fetchSparkCommentsInTab([sysIdMatch[1]]).catch((err) => {
+    console.error("[jira-ext] fetchSparkCommentsInTab failed:", err);
+    return [];
+  });
+  const entries = groups[0]?.comments || [];
+  console.log(
+    `[jira-ext] syncSparkCommentsForTicket: sys_id=${sysIdMatch[1]} issue=${issueKey} groups=${groups.length} entries=${entries.length}`,
+  );
+  return syncSparkComments(jiraOrigin, issueKey, entries);
 }
 
 // Single-ticket flow: reads the active QA ticket from the current tab,

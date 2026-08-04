@@ -1447,6 +1447,60 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
       return { items: [] };
     }
 
+    // The listing DOM already carries each row's number, short description,
+    // and full description (as a tooltip) — no API involved. When the Table
+    // API is ACL-blocked (the same restriction that hides journal entries),
+    // this is the fallback that keeps the bulk import on the user's page
+    // session with no REST call.
+    const readRowDom = (sysId) => {
+      let row = null;
+      document.querySelectorAll("tr.list_row").forEach((r) => {
+        if (row) return;
+        const rowSysId =
+          (r.getAttribute("sys_id") || "").trim() ||
+          (r.querySelector('input[type="checkbox"]')?.getAttribute(
+            "data-ux-metrics-sysid",
+          ) || "").trim() ||
+          (r.id || "").replace(/^row_[^_]+_/, "").trim();
+        if (rowSysId && rowSysId === sysId) row = r;
+      });
+      if (!row) return null;
+
+      const checkbox = row.querySelector('input[type="checkbox"]');
+      const link = row.querySelector("a.linked.formlink");
+      const number = link ? (link.textContent || "").trim() : "";
+      const numberCell = link ? link.closest("td") : null;
+      const shortDescCell = numberCell
+        ? numberCell.nextElementSibling
+        : null;
+      const descCell = shortDescCell
+        ? shortDescCell.nextElementSibling
+        : null;
+      const shortDescription = shortDescCell
+        ? (shortDescCell.textContent || "").replace(/\s+/g, " ").trim()
+        : "";
+      const cellText = (cell) =>
+        (cell.textContent || "").replace(/\s+/g, " ").trim();
+      const description = descCell
+        ? (descCell.getAttribute("title") || cellText(descCell))
+            .replace(/\t/g, "\n")
+            .replace(/[ \t]+/g, " ")
+            .trim()
+        : "";
+      return { row, checkbox, number, shortDescription, description };
+    };
+
+    // The description tooltip is plain text; escape it so it can flow
+    // through htmlToADF exactly like the API path's plain-text description.
+    const escapePlain = (value) =>
+      String(value || "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      })[c]);
+
     // ServiceNow Table API, authenticated the same way the page itself does:
     // the session cookie plus the page's CSRF token (window.g_ck) sent as
     // X-UserToken. This instance enforces the token on API calls, so it's
@@ -1517,12 +1571,33 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
     }
 
     fetchItem = async (id) => {
-      const response = await fetchWithRetry(
-        `${location.origin}/api/now/table/incident/${encodeURIComponent(id)}?sysparm_fields=number,short_description,description&sysparm_display_value=false`,
-        { credentials: "include", headers: apiHeaders },
-      );
-      if (!response.ok) {
-        throw new Error(`${apiName} ${response.status}`);
+      let response;
+      try {
+        response = await fetchWithRetry(
+          `${location.origin}/api/now/table/incident/${encodeURIComponent(id)}?sysparm_fields=number,short_description,description&sysparm_display_value=false`,
+          { credentials: "include", headers: apiHeaders },
+        );
+      } catch (err) {
+        response = null;
+      }
+      if (!response || !response.ok) {
+        // API unavailable (ACL-blocked or 401) — fall back to the listing
+        // row DOM so the bulk import still works on the page session.
+        const dom = readRowDom(String(id));
+        if (dom) {
+          return {
+            id: String(id),
+            number: dom.number || "",
+            name: dom.shortDescription || dom.number || String(id),
+            description: escapePlain(dom.description),
+            html: escapePlain(dom.description),
+            images: [],
+            url: itemUrl(id),
+          };
+        }
+        throw new Error(
+          `${apiName} ${response ? response.status : "network"} — row not in listing DOM`,
+        );
       }
       const json = await response.json();
       const record = Array.isArray(json?.result) ? json.result[0] : json?.result;
@@ -1754,32 +1829,285 @@ async function fetchSparkCommentsInPage(ids) {
   const headers = { Accept: "application/json" };
   if (userToken) headers["X-UserToken"] = userToken;
 
+  // Splits the incident record's journal field value (delimited text of the
+  // form "{date} - {author} ({label})\n{text}\n\n{next entry}...") into
+  // individual { createdAt, author, text } entries. Continuation paragraphs
+  // that don't start with a header get folded into the previous entry.
+  const parseJournalText = (raw) => {
+    const entries = [];
+    const withLabel = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+-\s+(.+?)\s+\(([^)]+)\)\s*$/;
+    const withoutLabel = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+-\s+(.+)$/;
+    let current = null;
+    for (const part of String(raw || "").split(/\n\n+/)) {
+      const firstLine = part.split(/\r?\n/)[0];
+      const m = withLabel.exec(firstLine) || withoutLabel.exec(firstLine);
+      if (m) {
+        if (current) entries.push(current);
+        current = {
+          createdAt: m[1].trim(),
+          author: m[2].trim(),
+          label: m[3]?.trim() || "",
+          text: part.slice(firstLine.length).trim(),
+        };
+      } else if (current) {
+        current.text = `${current.text}\n\n${part.trim()}`.trim();
+      }
+    }
+    if (current) entries.push(current);
+    return entries;
+  };
+
   const fetchIncident = async (id) => {
-    const comments = [];
+    // Method 1: structured journal rows, one per entry.
+    let entries = [];
+    let journalNote = "";
     try {
       const response = await fetch(
         `${location.origin}/api/now/table/sys_journal_field?sysparm_query=element_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=element,value,sys_created_by,sys_created_on&sysparm_display_value=true&sysparm_limit=1000`,
         { credentials: "include", headers },
       );
-      if (!response.ok) return comments;
-      const json = await response.json();
-      for (const row of Array.isArray(json?.result) ? json.result : []) {
-        const element = String(row?.element || "").trim();
-        if (element !== "comments" && element !== "work_notes") continue;
-        const author = String(row?.sys_created_by || "").trim();
-        const text = String(row?.value || "").trim();
-        if (!text && !author) continue;
-        comments.push({
-          kind: element,
-          author,
-          createdAt: String(row?.sys_created_on || "").trim(),
-          text,
-        });
+      if (response.ok) {
+        const json = await response.json();
+        const rows = Array.isArray(json?.result) ? json.result : [];
+        const seenElements = new Set();
+        for (const row of rows) {
+          const rawElement = String(row?.element || "").trim();
+          if (!rawElement) continue;
+          seenElements.add(rawElement);
+          const isPublic =
+            rawElement === "comments" || rawElement === "additional_comments";
+          const author = String(row?.sys_created_by || "").trim();
+          const text = String(row?.value || "").trim();
+          if (!text && !author) continue;
+          entries.push({
+            kind: isPublic ? "comments" : "work_notes",
+            author,
+            createdAt: String(row?.sys_created_on || "").trim(),
+            text,
+          });
+        }
+        journalNote = `journal_field=${entries.length} (${Array.from(seenElements).join(", ") || "no elements"})`;
+      } else {
+        journalNote = `journal_field HTTP ${response.status}`;
       }
-    } catch {
-      // leave this incident's comments empty
+    } catch (err) {
+      journalNote = `journal_field threw (${String(err?.message || err).slice(0, 60)})`;
     }
-    return comments;
+
+    // Method 1b (GlideRecord): the REST Table API is ACL-blocked, but
+    // client-side GlideRecord wraps GlideAjax and runs server-side with
+    // elevated privileges — the same path the ServiceNow UI uses to render
+    // the activity stream.
+    if (!entries.length && typeof GlideRecord !== "undefined") {
+      let grNote = "";
+      try {
+        await new Promise((resolve) => {
+          const gr = new GlideRecord("sys_journal_field");
+          gr.addQuery("element_id", id);
+          gr.orderBy("sys_created_on");
+          gr.setLimit(1000);
+          console.log(
+            `[jira-ext] glide_record: query element_id=${id}, hasQuery=${typeof gr.addQuery}, hasQueryFn=${typeof gr.query}, hasNext=${typeof gr.next}, hasGetVal=${typeof gr.getValue}`,
+          );
+          gr.query(function () {
+            let count = 0;
+            const seenElements = new Set();
+            while (gr.next()) {
+              count++;
+              const rawElement = String(gr.getValue("element") || "").trim();
+              if (!rawElement) continue;
+              seenElements.add(rawElement);
+              const isPublic =
+                rawElement === "comments" ||
+                rawElement === "additional_comments";
+              const author = String(
+                gr.getValue("sys_created_by") || "",
+              ).trim();
+              const text = String(gr.getValue("value") || "").trim();
+              if (!text && !author) continue;
+              entries.push({
+                kind: isPublic ? "comments" : "work_notes",
+                author,
+                createdAt: String(
+                  gr.getValue("sys_created_on") || "",
+                ).trim(),
+                text,
+              });
+            }
+            console.log(
+              `[jira-ext] glide_record: callback done, cursorHits=${count}, entries=${entries.length}, elements=[${Array.from(seenElements).join(", ")}]`,
+            );
+            grNote = `glide_record=${entries.length} (${Array.from(seenElements).join(", ") || "no elements"})`;
+            resolve();
+          });
+        });
+      } catch (err) {
+        grNote = `glide_record threw (${String(err?.message || err).slice(0, 60)})`;
+      }
+      journalNote += `, ${grNote}`;
+    }
+
+    // Method 2 (fallback): the incident record's own journal fields carry the
+    // full history as delimited text when sysparm_display_value=true
+    // (ServiceNow KB0860915) — usable even where sys_journal_field is empty
+    // for the session.
+    let recordNote = "";
+    if (!entries.length) {
+      try {
+        const response = await fetch(
+          `${location.origin}/api/now/table/incident/${encodeURIComponent(id)}?sysparm_fields=comments,additional_comments,work_notes&sysparm_display_value=true`,
+          { credentials: "include", headers },
+        );
+        if (response.ok) {
+          const json = await response.json();
+          const rec = json?.result;
+          const seen = new Set();
+          const fields = [
+            "comments",
+            "additional_comments",
+            "work_notes",
+            "comments_and_work_notes",
+          ];
+          for (const field of fields) {
+            for (const entry of parseJournalText(rec?.[field])) {
+              // For the combined field the kind comes from the "(Work notes)"
+              // label; for the individual fields the field name decides.
+              const isWork =
+                field === "work_notes" ||
+                (field === "comments_and_work_notes" &&
+                  /work\s*notes?/i.test(entry.label || ""));
+              const kind = isWork ? "work_notes" : "comments";
+              const key = `${kind}|${entry.createdAt}|${entry.author}|${entry.text}`;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              entries.push({ kind, ...entry });
+            }
+          }
+          entries.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+        } else {
+          recordNote = `record HTTP ${response.status}`;
+        }
+      } catch (err) {
+        recordNote = `record threw (${String(err?.message || err).slice(0, 60)})`;
+      }
+    }
+
+    // Method 3 (DOM fallback): both API paths empty — journal entries are
+    // visible in the ServiceNow UI but ACL-blocked over the REST API. This
+    // function runs inside every frame (allFrames: true), so whichever frame
+    // contains the incident form's Updates tab gets its entries scraped.
+    if (!entries.length) {
+      try {
+        // Only journal entries (Work notes / Additional comments) carry
+        // data-journal-id; emails, field changes, and image uploads don't.
+        for (const li of document.querySelectorAll("li[data-journal-id]")) {
+          const author =
+            li.querySelector(".sn-card-component-createdby")?.textContent
+              ?.trim() || "";
+          const typeLabel =
+            li.querySelector(".sn-card-component-time > span:first-child")
+              ?.textContent?.trim() || "";
+          const dateStr =
+            li.querySelector(".date-calendar")?.textContent?.trim() || "";
+          const text =
+            li.querySelector(".sn-widget-textblock-body")?.textContent?.trim() ||
+            "";
+          if (!dateStr || !author) continue;
+          if (
+            !/work\s*notes?/i.test(typeLabel) &&
+            !/additional\s*comments?/i.test(typeLabel)
+          )
+            continue;
+          entries.push({
+            kind: /work\s*notes?/i.test(typeLabel) ? "work_notes" : "comments",
+            author,
+            createdAt: dateStr,
+            text,
+          });
+        }
+        if (entries.length) {
+          console.log(
+            `[jira-ext] spark journal ${id}: DOM scrape found ${entries.length} journal entries`,
+          );
+        }
+      } catch (err) {
+        console.log(`[jira-ext] spark journal ${id} DOM scrape threw:`, err);
+      }
+    }
+
+    // Method 4 (detail-page fetch): a listing page never renders the activity
+    // stream — `li[data-journal-id]` only exists once the incident's own form
+    // page is open. But that form HTML is reachable over the same session+CSRF
+    // (no Table API, so no ACL restriction), so fetch it and parse the stream
+    // out of the response instead of scraping the listing DOM.
+    if (!entries.length) {
+      let pageNote = "";
+      try {
+        const response = await fetch(
+          `${location.origin}/incident.do?sys_id=${encodeURIComponent(id)}`,
+          { credentials: "include", headers },
+        );
+        if (response.ok) {
+          const html = await response.text();
+          const doc = new DOMParser().parseFromString(html, "text/html");
+          for (const li of doc.querySelectorAll("li[data-journal-id]")) {
+            const author =
+              li.querySelector(".sn-card-component-createdby")?.textContent
+                ?.trim() || "";
+            const typeLabel =
+              li.querySelector(".sn-card-component-time > span:first-child")
+                ?.textContent?.trim() || "";
+            const dateStr =
+              li.querySelector(".date-calendar")?.textContent?.trim() || "";
+            const text =
+              li.querySelector(".sn-widget-textblock-body")?.textContent
+                ?.trim() || "";
+            if (!dateStr || !author) continue;
+            if (
+              !/work\s*notes?/i.test(typeLabel) &&
+              !/additional\s*comments?/i.test(typeLabel)
+            )
+              continue;
+            entries.push({
+              kind: /work\s*notes?/i.test(typeLabel)
+                ? "work_notes"
+                : "comments",
+              author,
+              createdAt: dateStr,
+              text,
+            });
+          }
+          pageNote = `page fetch=${entries.length} entries`;
+        } else {
+          pageNote = `page fetch HTTP ${response.status}`;
+        }
+      } catch (err) {
+        pageNote = `page fetch threw (${String(err?.message || err).slice(0, 60)})`;
+      }
+      if (pageNote) {
+        console.log(`[jira-ext] spark journal ${id}: ${pageNote}`);
+      }
+    }
+
+    // Sort chronologically (oldest first) so Jira's comment list reads as a
+    // history — comment #1 is the oldest journal entry. The ServiceNow DOM
+    // lists newest-first, so without this sort Jira shows the newest entry
+    // at the top. Handles the DOM's European DD/MM/YYYY dates and the API's
+    // YYYY-MM-DD timestamps alike.
+    const parseDate = (value) => {
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/.exec(
+        String(value || "").trim(),
+      );
+      if (m) return new Date(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +m[6]);
+      const t = Date.parse(String(value || "").replace(/\s/g, "T"));
+      return Number.isFinite(t) ? new Date(t) : new Date(0);
+    };
+    entries.sort((a, b) => parseDate(a.createdAt) - parseDate(b.createdAt));
+
+    console.log(
+      `[jira-ext] spark journal ${id}: ${entries.length} entries — ${journalNote}${recordNote ? `, ${recordNote}` : ""}`,
+    );
+    return entries;
   };
 
   // Fetched in parallel but written back into their original slots so the
@@ -1817,11 +2145,19 @@ export async function fetchSparkCommentsInTab(ids) {
   });
 
   const outs = results.map((r) => r.result).filter(Boolean);
-  return (
-    outs.find((g) => g.some((x) => x.comments?.length > 0)) ||
-    outs.find((g) => g.length > 0) ||
-    []
+  const countComments = (groups) =>
+    groups.reduce(
+      (sum, g) => sum + (Array.isArray(g?.comments) ? g.comments.length : 0),
+      0,
+    );
+  const best =
+    outs
+      .filter((g) => Array.isArray(g) && g.length > 0)
+      .sort((a, b) => countComments(b) - countComments(a))[0] || [];
+  console.log(
+    `[jira-ext] fetchSparkCommentsInTab: ${outs.length} frames returned data, picked one with ${countComments(best)} comments`,
   );
+  return best;
 }
 
 export {

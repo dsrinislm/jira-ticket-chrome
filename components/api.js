@@ -418,6 +418,35 @@ async function listIssueAttachments(jiraBaseUrl, issueKey) {
   return Array.isArray(attachments) ? attachments.map((a) => a.filename) : [];
 }
 
+// Extracts plain text out of an Atlassian Document Format body so the
+// first-line comment dedup works on Jira Cloud (its REST API returns `body`
+// as ADF, never as the plain string that was originally posted).
+function textToAdf(text) {
+  if (typeof text !== "string") text = String(text ?? "");
+  const lines = text.split("\n");
+  const content = lines.map((line) => ({
+    type: "paragraph",
+    content: line ? [{ type: "text", text: line }] : [],
+  }));
+  return { version: 1, type: "doc", content };
+}
+
+function adfToText(node) {
+  if (!node || typeof node !== "object") return "";
+  if (typeof node.text === "string") return node.text;
+  if (!Array.isArray(node.content)) return "";
+  const isBlock =
+    node.type === "doc" ||
+    node.type === "paragraph" ||
+    node.type === "heading" ||
+    node.type === "codeBlock" ||
+    node.type === "listItem";
+  return node.content
+    .map(adfToText)
+    .filter(Boolean)
+    .join(isBlock ? "\n" : "");
+}
+
 // Lists an issue's existing comment bodies (plain text). Used to dedupe
 // source comments on re-runs so a sync never duplicates what's already there.
 async function listJiraComments(jiraBaseUrl, issueKey) {
@@ -430,7 +459,11 @@ async function listJiraComments(jiraBaseUrl, issueKey) {
   }
   const data = await response.json();
   const comments = Array.isArray(data?.comments) ? data.comments : [];
-  return comments.map((c) => (typeof c?.body === "string" ? c.body : ""));
+  return comments.map((c) => {
+    if (typeof c?.body === "string") return c.body;
+    if (c?.body && typeof c.body === "object") return adfToText(c.body).trim();
+    return "";
+  });
 }
 
 // Adds one plain-text comment to a Jira issue. Each source journal entry
@@ -447,7 +480,7 @@ async function addJiraComment(jiraBaseUrl, issueKey, body) {
         "Content-Type": "application/json",
         "X-Atlassian-Token": "no-check",
       },
-      body: JSON.stringify({ body }),
+      body: JSON.stringify({ body: textToAdf(body) }),
     },
     { retryStatus: false },
   );

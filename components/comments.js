@@ -29,10 +29,17 @@ export async function syncSparkComments(jiraOrigin, issueKey, entries) {
         .map((body) => String(body || "").split("\n")[0].trim())
         .filter(Boolean),
     );
+    console.log(
+      `[jira-ext] syncSparkComments ${issueKey}: ${entries.length} entries, ${existing.length} existing comments, ${known.size} known headers`,
+    );
     let added = 0;
     for (const entry of entries) {
       const header = sparkCommentHeader(entry);
-      if (known.has(header)) continue;
+      if (known.has(header)) {
+        console.log(`[jira-ext] comment skip (already synced): ${header}`);
+        continue;
+      }
+      console.log(`[jira-ext] comment post: ${header}`);
       await addJiraComment(jiraOrigin, issueKey, sparkCommentBody(entry));
       known.add(header);
       added++;
