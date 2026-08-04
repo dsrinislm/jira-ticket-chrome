@@ -1,12 +1,7 @@
-// Pure ExcelJS logic — no DOM access, so it's unit-testable in Node.
-// ExcelJS itself is loaded lazily (see loadExcelJS) and only when a file
-// is actually imported or the report is exported.
+
 
 let exceljsPromise = null;
 
-// Loads the ExcelJS UMD bundle on first use and caches the constructor.
-// In the browser the UMD sets globalThis.ExcelJS; in Node tests it can be
-// injected directly by setting globalThis.ExcelJS beforehand.
 export async function loadExcelJS() {
   if (globalThis.ExcelJS) return globalThis.ExcelJS;
   if (!exceljsPromise) {
@@ -20,11 +15,6 @@ export async function loadExcelJS() {
   return exceljsPromise;
 }
 
-// Reads a cell's display text plus its hyperlink target. `linked` tells
-// callers whether the cell really holds a hyperlink (vs a plain value) —
-// needed so a Spark "Number" cell only becomes a source URL when it's
-// actually clickable. `url` falls back to the display text for the Octane
-// ID flow, which has always relied on it.
 export function readCell(row, colIdx) {
   if (colIdx < 0) return { text: "", url: "", linked: false };
   const cell = row.getCell(colIdx + 1);
@@ -33,18 +23,6 @@ export function readCell(row, colIdx) {
   return { text, url: rawUrl || text, linked: Boolean(rawUrl) };
 }
 
-// Reads rows from the first worksheet as
-// { site, rows: [{ name, description, sourceUrl, idText, rowIndex }] }.
-//
-// Two schemas are supported, detected from the header row:
-//  - Octane: "ID" / "Name" / "Description"
-//  - Spark:  "Number" / "Short description" / "Description", with a
-//    combined "Comments and Work notes" column appended to the issue body
-//
-// Columns are matched by header (case-insensitive, substring-tolerant,
-// underscores treated as spaces). For the ID/Number column we keep both
-// the display text and the hyperlink URL, since linked cells store the
-// real address in cell.hyperlink while cell.text holds the displayed value.
 export function parseSheetRows(worksheet) {
   const headers = [];
   worksheet.getRow(1).eachCell({ includeEmpty: true }, (cell, colNumber) => {
@@ -66,13 +44,9 @@ export function parseSheetRows(worksheet) {
   const numberIdx = findCol("number");
   const shortIdx = findCol("short description");
   let descIdx = findCol("description");
-  // "Short description" also matches a bare "description" search — a file
-  // needs a distinct Description column, not just the short one.
+
   if (descIdx === shortIdx) descIdx = -1;
 
-  // Spark: Number / Short description / Description (+ "Comments and Work
-  // notes" single column). Tolerates separate Comments/Work notes columns
-  // as a fallback for older exports.
   if (numberIdx >= 0 && shortIdx >= 0 && descIdx >= 0) {
     const notesIdx = findCol("comments and work notes");
     const commentsIdx = findCol("comments");
@@ -100,7 +74,7 @@ export function parseSheetRows(worksheet) {
         rowIndex: r - 1,
         name,
         description,
-        // Source URL only when the Number cell is actually a clickable link.
+
         sourceUrl: idCell.linked ? idCell.url : "",
         idText: idCell.text,
       });
@@ -108,7 +82,6 @@ export function parseSheetRows(worksheet) {
     return { site: "Spark", rows: parsed };
   }
 
-  // Octane: ID / Name / Description
   const nameIdx = findCol("name");
   const idIdx = findCol("id");
   if (idIdx >= 0 && nameIdx >= 0 && descIdx >= 0) {
@@ -132,14 +105,6 @@ export function parseSheetRows(worksheet) {
   return { site: null, rows: [] };
 }
 
-// Turns the imported workbook into the download report, in place:
-//  - drops native Excel tables (ExcelJS round-trips them incorrectly,
-//    and a stale table ref/headerRowCount is what made Excel flag the
-//    file as corrupt)
-//  - inserts a Status column (A), styling the whole header row
-//  - writes each row's result (text + optional link) into column A
-//  - re-styles any hyperlink cell as a blue underline
-// rows: [{ rowIndex, text, href? }] where rowIndex is 0-based.
 export function buildReport(workbook, rows) {
   const sheet = workbook.worksheets[0];
 
@@ -188,9 +153,6 @@ export function buildReport(workbook, rows) {
     }
   });
 
-  // Only touch cells that actually exist — avoids materializing every
-  // cell in the grid (a nested getCell(r,c) loop does O(rows*cols) work
-  // on large imports).
   sheet.eachRow((row) => {
     row.eachCell((cell) => {
       if (cell.hyperlink) cell.font = linkFont;

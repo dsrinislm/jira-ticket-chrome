@@ -1,0 +1,13 @@
+{
+  "name": "jira-ticket-chrome",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "eslint components popup.js",
+    "lint:fix": "eslint components popup.js --fix"
+  },
+  "devDependencies": {
+    "eslint": "^10.8.0"
+  }
+}

@@ -32,33 +32,21 @@ import {
   failedAttachmentNames,
   uploadMissingAttachments,
   attachImagesToIssue,
-  requestUploadCancel,
 } from "./attachments.js";
 
-// Fetches the open Spark incident's comments/work notes through the ServiceNow
-// API (sys_journal_field — no DOM scraping) and posts each as its own Jira
-// comment, deduped against the issue's existing comments. Spark only: Octane
-// has no journal path, and without a sys_id in the details URL there's nothing
-// to fetch. Best-effort — never throws.
 async function syncSparkCommentsForTicket(jiraOrigin, issueKey, pageData) {
   if (getSourceSite() !== "Spark" || !issueKey || !pageData?.url) {
     return { added: 0, total: 0 };
   }
   const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(pageData.url || "");
   if (!sysIdMatch) return { added: 0, total: 0 };
-  const groups = await fetchSparkCommentsInTab([sysIdMatch[1]]).catch((err) => {
-    console.error("[jira-ext] fetchSparkCommentsInTab failed:", err);
+  const groups = await fetchSparkCommentsInTab([sysIdMatch[1]]).catch(() => {
     return [];
   });
   const entries = groups[0]?.comments || [];
-  console.log(
-    `[jira-ext] syncSparkCommentsForTicket: sys_id=${sysIdMatch[1]} issue=${issueKey} groups=${groups.length} entries=${entries.length}`,
-  );
   return syncSparkComments(jiraOrigin, issueKey, entries);
 }
 
-// Single-ticket flow: reads the active QA ticket from the current tab,
-// creates (or syncs) its Jira ticket, and uploads the selected attachments.
 export async function createTicket() {
   setBusy(true);
 
@@ -71,10 +59,6 @@ export async function createTicket() {
     const { jiraOrigin, projectKey } = getJiraContext() || {};
     if (!jiraOrigin || !projectKey) return;
 
-    // Only scrape (and later upload) the ticket's attachments when the user
-    // opted in — capturing every file from the attachments tab is the slow
-    // part of an export, so a no-attachments ticket skips it entirely. When
-    // the picker has a selection, only the checked files are captured.
     const includeAttachments = getIncludeAttachments();
     const selectedAttachments = includeAttachments
       ? getSelectedAttachments()
@@ -84,9 +68,7 @@ export async function createTicket() {
 
     let pageData;
     try {
-      // Phase 1 lists the selected attachments WITHOUT downloading their
-      // bytes. The slow byte downloads happen afterwards — only for the files
-      // a Jira ticket is actually missing.
+
       pageData = await getPageData(getSourceSite(), {
         includeAttachments,
         selectedAttachments,
@@ -98,8 +80,7 @@ export async function createTicket() {
     }
 
     if (!pageData?.title) {
-      // Distinguish "this tab isn't a QA site" from "a QA site is open but
-      // doesn't match the selected source".
+
       const detected = await detectSiteInTab().catch(() => null);
 
       setStatus(
@@ -153,11 +134,6 @@ export async function createTicket() {
       let finalStatus = "";
       let finalStatusType = "success";
 
-      // A previous create may have left some attachments behind (e.g. a
-      // transient 401 on one upload). When the ticket already exists, sync
-      // only the files the issue is actually missing: list what's already
-      // attached, then download bytes for just the missing ones — never the
-      // files that are already up to date.
       if (includeAttachments && pageData.images?.length) {
         setStatus(
           `Checking ${existing.issue.key} attachments...`,
@@ -172,7 +148,7 @@ export async function createTicket() {
             (img) => !existingNames.has(imageUploadFilename(img)),
           );
         } catch {
-          // Listing failed — fall back to capturing everything selected.
+
         }
 
         if (!missing.length) {
@@ -187,8 +163,7 @@ export async function createTicket() {
             selectedAttachments: missing.map((img) =>
               imageUploadFilename(img),
             ),
-            // Sync only cares about the missing attachment files — the
-            // description is left untouched, so skip embedded images.
+
             captureEmbeddedImages: false,
           }).catch(() => null);
 
@@ -214,9 +189,7 @@ export async function createTicket() {
                 ),
             );
             setSyncProgressVisible(false);
-            // The files this run actually uploaded are now synced — mark
-            // them checked + disabled in the open picker so a re-run
-            // reflects it.
+
             markAttachmentsSynced(attachReport.uploadedNames);
             if (attachReport.cancelled) {
               finalStatus = `Upload stopped. ${existing.issue.key} attachments not synced.`;
@@ -236,9 +209,6 @@ export async function createTicket() {
         finalStatus = `Ticket already exists: ${existing.issue.key}`;
       }
 
-      // Each Spark comment/work note becomes its own Jira comment (deduped),
-      // whether this run created anything or not — a resync picks up any
-      // journal entries added since the last export.
       const commentSync = await syncSparkCommentsForTicket(
         jiraOrigin,
         existing.issue.key,
@@ -254,11 +224,6 @@ export async function createTicket() {
       return;
     }
 
-    // New ticket: produce the final description. Images embedded in the
-    // description are inline content, so they're captured and uploaded with
-    // placeholders regardless of the attachments checkbox — attachment files
-    // still follow the checkbox and the picker selection. Phase 1 only
-    // listed names, so the bytes are downloaded here.
     const hasEmbeddedImages = /<img[^>]*>/i.test(pageData.html || "");
     let capturedData = pageData;
     if (hasEmbeddedImages || (includeAttachments && pageData.images?.length)) {
@@ -271,8 +236,7 @@ export async function createTicket() {
           ? captured
           : { ...captured, images: [] };
       } else {
-        // Re-capture failed — keep the phase-1 data but drop the name-only
-        // metadata so it's never mistaken for real captured bytes.
+
         capturedData = { ...pageData, images: [] };
       }
     }
@@ -311,13 +275,11 @@ export async function createTicket() {
           ),
       );
     }
-    // The files this run actually uploaded are now synced — mark them checked
-    // + disabled in the open picker so a re-run reflects it.
+
     markAttachmentsSynced(attachReport.uploadedNames);
 
     const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
 
-    // Each Spark comment/work note becomes its own Jira comment (deduped).
     const commentSync = await syncSparkCommentsForTicket(
       jiraOrigin,
       issue.key,
@@ -347,7 +309,6 @@ export async function createTicket() {
     renderTicketCard(issue.key, issueUrl);
     saveProjectHistory(projectKey);
   } catch (error) {
-    console.error(error);
     setStatus(error.message || "Failed to create ticket.", "error");
   } finally {
     setSyncProgressVisible(false);

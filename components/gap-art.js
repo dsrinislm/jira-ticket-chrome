@@ -1,14 +1,5 @@
 import { gapArt, gapArtBulk } from "./ui.js";
 
-// Decorative canvases that occupy the gap between the main content and the
-// bottom of the popup. The single view's gap opens up when no source site
-// (Octane/Spark) is detected, because the source-site section is hidden; the
-// bulk view's gap is its trailing .view-fill space (pinned to the single
-// view's height by the initial load-time equalizer). Both are filled with a
-// slow field of drifting dots in the popup's indigo palette.
-// Only the visible canvas paints (the other view is display:none, so its
-// canvas measures 0 and is skipped); pauses entirely while the document is
-// backgrounded and renders a single static frame for reduced-motion users.
 const PALETTE = [
   [91, 75, 255],
   [145, 132, 255],
@@ -80,11 +71,6 @@ function update(scene) {
   }
 }
 
-// The animation only runs while it can actually be seen: a canvas is measured
-// (0 when hidden behind the other view or the source-site section) and the
-// loop is paused entirely when the document is backgrounded. A never-stopping
-// rAF loop costs nothing to draw but still wakes the CPU at ~60fps for as
-// long as the popup is open.
 let rafId = 0;
 let running = false;
 
@@ -128,7 +114,7 @@ function syncVisibility() {
     for (const scene of scenes) {
       if (scene.canvas.clientWidth > 0 && scene.canvas.clientHeight > 0) {
         resize(scene);
-        paint(scene); // static frame up front so reduced-motion users still see it
+        paint(scene);
       }
     }
     start();
@@ -139,8 +125,7 @@ function syncVisibility() {
 
 export function startGapArt() {
   document.addEventListener("visibilitychange", syncVisibility);
-  // Each canvas toggles between real and zero size as views/sections swap,
-  // so the observer starts and stops the loop in step with the layout.
+
   if (typeof ResizeObserver === "function") {
     const observer = new ResizeObserver(syncVisibility);
     scenes.forEach((scene) => observer.observe(scene.canvas));

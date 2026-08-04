@@ -1,8 +1,6 @@
 import { setStatus, showLoginButton } from "./ui.js";
 import { isJiraLoggedIn, validateProject } from "./api.js";
 
-// Validates the Jira session and project access, showing the right error
-// (and login CTA) when either fails. Returns true when imports can proceed.
 export async function ensureJiraReady(jiraOrigin, projectKey) {
   setStatus("Checking Jira session...", "loading");
   if (!(await isJiraLoggedIn(jiraOrigin))) {

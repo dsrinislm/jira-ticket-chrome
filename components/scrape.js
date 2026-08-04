@@ -1,22 +1,14 @@
-// Site scraping for the single-ticket flow.
+
 
 const SITES = [
   {
     name: "Octane",
-    // Octane is an SPA: the URL only pins the workspace (?p=), so the site is
-    // deduced from that param alone on both the listing and detail views (no
-    // DOM involved). The entity-id header element exists only on a ticket's
-    // detail view and supplies the id that feeds the REST API, which provides
-    // the name, description, and attachments (octaneApiPath).
+
     idSelector: ".entity-form-document-view-header-entity-id-container",
   },
   {
     name: "Spark",
-    // ServiceNow is API-first: the sys_id in the details URL drives the
-    // same-origin Table API (see scrapeInPage's sparkIncidentApiPath). These
-    // selectors are only the fallback — when the API can't be reached from
-    // the page context (401, blocked fetch, non-ServiceNow frame), the flow
-    // reads the incident form directly instead of failing outright.
+
     idSelector: 'input[name="incident.number"]',
     titleSelectors: 'input[name="incident.short_description"]',
     editorSelector: 'textarea[name="incident.description"]',
@@ -28,11 +20,6 @@ export function getSite(name) {
   return SITES.find((site) => site.name === name) || null;
 }
 
-// Runs in the tab's page context: returns the name of the first site whose
-// details page this is, or null. Both sites are deduced from their URL alone:
-// Octane from the SPA workspace param in ?p= (the entity-id header element is
-// never present on the listing page, so detection must not depend on the DOM),
-// and Spark from an incident.do URL carrying a sys_id — no form fields involved.
 function detectInPage(sites) {
   const octane = sites.find((s) => s.name === "Octane");
   if (octane && /[?&]p=[^&#/]+\/[^&#]+/.test(location.search || "")) {
@@ -57,18 +44,16 @@ async function detectSiteInTab() {
   const currentTab = await getCurrentTab();
 
   try {
-    // Scan every frame — the site's form may live in an iframe (common in
-    // QA apps), and document.querySelector only sees the current frame.
+
     const results = await chrome.scripting.executeScript({
       target: { tabId: currentTab.id, allFrames: true },
       func: detectInPage,
       args: [SITES],
     });
 
-    // Main frame comes first in the results, so prefer its match.
     return results.map((r) => r.result).find(Boolean) || null;
   } catch {
-    // Script can't run on this page (e.g. chrome://) — no detection.
+
     return null;
   }
 }
@@ -79,46 +64,20 @@ export async function getCurrentTab() {
   return tabs[0];
 }
 
-// NOTE: functions passed to chrome.scripting.executeScript (func:) must NOT
-// be `export`-prefixed. Function.prototype.toString() keeps the `export`
-// keyword on module-level exported functions in some Chrome builds, and the
-// injected source is then evaluated as a classic script → "Unexpected token
-// 'export'". They're exported via the export{} list at the bottom instead.
 async function scrapeInPage(site, options = {}) {
   const includeAttachments = options.includeAttachments !== false;
   const selectedAttachments = options.selectedAttachments || null;
-  // When false, the scrape only LISTS the selected attachment names without
-  // downloading any bytes. The popup uses this cheap pass to decide which
-  // files a Jira ticket is actually missing before paying for the slow byte
-  // downloads — files that already exist are never fetched.
+
   const captureAttachments = options.captureAttachments !== false;
-  // When false, the description's embedded images are left untouched and NOT
-  // downloaded (the popup's metadata pass and existing-ticket sync both pass
-  // it, so they never pay for description-image bytes). When true — the
-  // default — embedded images are captured and uploaded with placeholders
-  // REGARDLESS of the attachments checkbox: they're inline description
-  // content, not selectable attachment files.
+
   const captureEmbeddedImages = options.captureEmbeddedImages !== false;
 
-  // --- Octane: minimal-DOM id + REST API path --------------------------------
-  // Octane is an SPA: the URL only pins the workspace (?p=<sharedSpace>/<workspace>),
-  // never the ticket — a listing and its detail view can share the same
-  // location. So the ticket id comes from the entity-id header element
-  // (minimal DOM) and the name, description, and attachments are read through
-  // the same-origin REST API (session cookie, identical to the listing
-  // import). The id is never taken from the URL: the SPA can leave a stale id
-  // in the hash on the listing page, so an absent element means "no ticket
-  // open" and the flow returns empty rather than guessing. Runs in the page
-  // context, so it must be self-contained (no module imports). Returns null
-  // when the page can't be read this way.
   const octaneApiPath = async () => {
     const contextMatch = /[?&]p=([^&#/]+\/[^&#]+)/.exec(location.search || "");
     if (!contextMatch) return null;
     const [sharedSpace, workspace] = contextMatch[1].split("/");
     if (!sharedSpace || !workspace) return null;
 
-    // Minimal DOM: the entity-id header element. Handles both a plain text
-    // container and one wrapping an input, and extracts the numeric id.
     const itemId = (() => {
       if (!site.idSelector) return null;
       const el = document.querySelector(site.idSelector);
@@ -140,7 +99,6 @@ async function scrapeInPage(site, options = {}) {
 
     const apiBase = `${location.origin}/api/shared_spaces/${sharedSpace}/workspaces/${workspace}`;
 
-    // Downloads a file over the same session and resolves to its data URL.
     const toDataUrl = async (url) => {
       const response = await fetch(url, { credentials: "include" });
       const blob = await response.blob();
@@ -172,7 +130,7 @@ async function scrapeInPage(site, options = {}) {
     let html;
     let text = "";
     if (plain) {
-      // Plain text comes back escaped so it can flow through htmlToADF.
+
       text = raw;
       html = raw.replace(/[&<>"']/g, (c) => ({
         "&": "&amp;",
@@ -182,12 +140,7 @@ async function scrapeInPage(site, options = {}) {
         "'": "&#39;",
       })[c]);
     } else {
-      // Rich description — extract embedded images to data URLs and swap in
-      // placeholders, mirroring the DOM path so htmlToADF sees the same shape.
-      // Embedded images are inline description content, so they follow
-      // `captureEmbeddedImages` on their own — independent of the attachments
-      // checkbox (`includeAttachments`), which only governs the attachment
-      // files listed in the picker.
+
       const doc = new DOMParser().parseFromString(raw, "text/html");
       if (captureEmbeddedImages) {
         let imgIndex = 0;
@@ -217,15 +170,9 @@ async function scrapeInPage(site, options = {}) {
       html = doc.body ? doc.body.innerHTML : "";
     }
 
-    // The work item's attachments, listed through the API and downloaded as
-    // data URLs. Each file gets a __JIRA_IMG_n__ placeholder appended to the
-    // html (as <p>, like the DOM path) so the popup uploads it as a Jira
-    // attachment; the optional picker selection narrows which files to take.
     if (includeAttachments) {
       const query = `owner_work_item EQ {id EQ ${itemId}}`;
-      // Request the same explicit field set the picker uses — Octane's
-      // default attachment fields aren't guaranteed to include `name`, and
-      // without it every file is dropped by the `kept` filter below.
+
       const fields = "id,name,description,client_lock_stamp,size,exists";
       let attachments = [];
       try {
@@ -252,11 +199,10 @@ async function scrapeInPage(site, options = {}) {
       );
 
       if (captureAttachments === false) {
-        // Metadata pass — names only, no byte downloads.
+
         for (const att of kept) images.push({ name: String(att.name) });
       } else {
-        // Bounded pool over the selected files, keeping source order so each
-        // placeholder still lines up with the file it was captured from.
+
         let attImageIndex = 0;
         let attIndex = 0;
         const worker = async () => {
@@ -270,7 +216,7 @@ async function scrapeInPage(site, options = {}) {
               images.push({ placeholder, dataUrl, name: String(att.name) });
               html += `<p>${placeholder}</p>`;
             } catch {
-              // Couldn't fetch this file — drop it rather than aborting.
+
             }
           }
         };
@@ -305,21 +251,12 @@ async function scrapeInPage(site, options = {}) {
     };
   }
 
-  // Runs in the page context, so it must be self-contained (no module imports).
-  // Fetches one incident's details entirely through the ServiceNow Table API —
-  // no DOM. Returns null when the page can't provide an API context (no sys_id
-  // in the URL, a non-ServiceNow frame, an API error, or no record).
   async function sparkIncidentApiPath() {
     const searchMatch = /[?&]sys_id=([^&]+)/.exec(location.search || "");
     const hashMatch = /sys_id=([^&]+)/.exec(location.hash || "");
     const sysId = (searchMatch && searchMatch[1]) || (hashMatch && hashMatch[1]);
     if (!sysId) return null;
 
-    // ServiceNow Table API, authenticated the same way the page itself does:
-    // the session cookie plus the page's CSRF token (window.g_ck) sent as
-    // X-UserToken. This instance enforces the token on API calls, so it's
-    // required even for GETs. Runs in the MAIN world (scrapeTab) so the page
-    // global is visible.
     const userToken =
       (typeof window !== "undefined" && window.g_ck) ||
       document.querySelector('meta[name="X-UserToken"]')?.content ||
@@ -328,8 +265,6 @@ async function scrapeInPage(site, options = {}) {
     const apiHeaders = { Accept: "application/json" };
     if (userToken) apiHeaders["X-UserToken"] = userToken;
 
-    // Bounded retry for transient failures — a flaky network dropping a
-    // fetch shouldn't fail the export.
     async function fetchWithRetry(url, options, tries = 2) {
       let lastError;
       for (let attempt = 0; attempt < tries; attempt++) {
@@ -357,8 +292,6 @@ async function scrapeInPage(site, options = {}) {
       throw lastError || new Error("Spark API fetch failed");
     }
 
-    // Downloads a file to a data URL over the same session+CSRF. Resolves to
-    // null when the fetch fails — a bad file is dropped rather than aborting.
     async function sparkFetchToDataUrl(url, accept) {
       const headers = userToken ? { "X-UserToken": userToken } : {};
       if (accept) headers.Accept = accept;
@@ -381,7 +314,6 @@ async function scrapeInPage(site, options = {}) {
       }
     }
 
-    // Strips markup to plain text (mirrors the bulk path's plainText).
     const plainText = (value) => {
       if (!value) return "";
       return new DOMParser()
@@ -390,9 +322,6 @@ async function scrapeInPage(site, options = {}) {
         .trim();
     };
 
-    // The description comes back as plain text (escaped for htmlToADF) or rich
-    // HTML whose embedded images follow captureEmbeddedImages on their own —
-    // inline content, independent of the attachments checkbox.
     async function captureDescription(raw) {
       const images = [];
       const source = String(raw || "");
@@ -434,10 +363,6 @@ async function scrapeInPage(site, options = {}) {
       { credentials: "include", headers: apiHeaders },
     );
     if (!recordResponse.ok) {
-      console.error(
-        `[jira-ext] Spark incident API ${recordResponse.status} for ${sysId}`,
-        location.href,
-      );
       return null;
     }
     const json = await recordResponse.json().catch(() => null);
@@ -453,11 +378,6 @@ async function scrapeInPage(site, options = {}) {
       .filter(Boolean)
       .join(" | ");
 
-    // The incident's sys_attachment rows (what the details page shows under
-    // the attachment section), listed through the Table API and downloaded as
-    // data URLs. includeAttachments is the master switch; the picker's
-    // selection narrows the files; captureAttachments === false is the cheap
-    // metadata pass (names only, no bytes).
     if (includeAttachments) {
       const attResponse = await fetchWithRetry(
         `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(sysId)}&sysparm_fields=sys_id,file_name,content_type&sysparm_display_value=false&sysparm_limit=1000`,
@@ -477,7 +397,7 @@ async function scrapeInPage(site, options = {}) {
         const name = String(att.file_name).trim();
         if (!name || (selected && !selected.has(name))) continue;
         if (captureAttachments === false) {
-          // Metadata pass — names only, no byte downloads.
+
           images.push({ name });
           continue;
         }
@@ -506,12 +426,6 @@ async function scrapeInPage(site, options = {}) {
     };
   }
 
-  // DOM fallback for sparkIncidentApiPath — reads the incident form directly
-  // when the Table API can't be reached from the page context. Mirrors the
-  // old pre-API single-ticket path: the number/short_description inputs, the
-  // description textarea (escaped for htmlToADF), and the attachment section's
-  // links (name-only in the metadata pass, bytes on capture). Returns null
-  // when the form isn't present.
   async function sparkIncidentDomPath() {
     const readText = (selector) => {
       const el = document.querySelector(selector);
@@ -569,7 +483,7 @@ async function scrapeInPage(site, options = {}) {
           try {
             downloadUrl = new URL(href, location.href).href;
           } catch {
-            // Malformed href — drop this file rather than aborting.
+
             continue;
           }
           const response = await fetch(downloadUrl, {
@@ -586,7 +500,7 @@ async function scrapeInPage(site, options = {}) {
           images.push({ placeholder, dataUrl, name });
           html += `<p>${placeholder}</p>`;
         } catch {
-          // Couldn't fetch this file — drop it rather than aborting.
+
         }
       }
     }
@@ -602,24 +516,8 @@ async function scrapeInPage(site, options = {}) {
     };
   }
 
-  // --- Spark (ServiceNow): same-origin Table API path ------------------------
-  // Spark's details page is a form, but reading its fields out of the DOM
-  // (input[name="incident.number"], input[name="incident.short_description"],
-  // textarea[name="incident.description"], .attachment_list_items
-  // .content_editable) is brittle: fields can live in frames, and journal
-  // entries are collapsed. The sys_journal_field / incident / sys_attachment
-  // Table APIs (the same endpoints the details page is driven from) are the
-  // primary source. All the id ever provides is the incident's sys_id, pulled
-  // from the details URL — the number, short description, description, and
-  // attachments all come down over the API. The DOM path below is only the
-  // fallback: when the API can't be reached from the page context (401,
-  // blocked fetch, non-ServiceNow frame), the form itself is read instead so
-  // the flow keeps working.
   if (site.name === "Spark") {
-    const viaApi = await sparkIncidentApiPath().catch((err) => {
-      console.error("[jira-ext] Spark incident API path failed:", err);
-      return null;
-    });
+    const viaApi = await sparkIncidentApiPath().catch(() => null);
     if (viaApi?.title) return viaApi;
 
     const viaDom = await sparkIncidentDomPath();
@@ -637,12 +535,6 @@ async function scrapeInPage(site, options = {}) {
   }
 }
 
-// Runs in the tab's own page context — same constraints as scrapeInPage.
-// Lists each attachment's name, download url, type and (when available) size
-// WITHOUT fetching the file bytes. This cheap metadata pass feeds the popup's
-// attachment picker, so the user picks which files to upload before the slow
-// byte-by-byte capture ever runs. Octane lists through the REST API (no DOM);
-// Spark lists through the ServiceNow sys_attachment Table API (no DOM either).
 async function listTicketAttachmentsInPage(site) {
   try {
   const VIDEO_EXTS = new Set([
@@ -652,7 +544,6 @@ async function listTicketAttachmentsInPage(site) {
     "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff", "ico",
   ]);
 
-  // Formats API-reported byte sizes into the picker's human-readable label.
   const formatFileSize = (bytes) => {
     const n = Number(bytes);
     if (!Number.isFinite(n) || n < 0) return "";
@@ -668,13 +559,6 @@ async function listTicketAttachmentsInPage(site) {
     return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
   };
 
-  // Octane: the SPA URL only pins the workspace, so the ticket id comes from
-  // the entity-id header element (minimal DOM, never the URL/hash) and the
-  // files are listed through the same REST API the create path uses. The
-  // listing is metadata-only (no file bytes fetched), so the picker stays
-  // cheap. The API supplies size (bytes) and description, so those come
-  // straight through; type is derived from the file extension, and files the
-  // API reports as missing (exists=false) are dropped.
   if (site.name === "Octane") {
     const contextMatch = /[?&]p=([^&#/]+\/[^&#]+)/.exec(location.search || "");
     if (!contextMatch) return [];
@@ -716,8 +600,6 @@ async function listTicketAttachmentsInPage(site) {
       return [];
     }
 
-    // The API reports byte sizes, so they flow straight through to the picker
-    // (formatFileSize renders the label; sizeBytes feeds the upload cutoff).
     return data
       .filter(
         (att) =>
@@ -747,20 +629,8 @@ async function listTicketAttachmentsInPage(site) {
       });
   }
 
-  // Spark: list the incident's sys_attachment rows directly through the
-  // ServiceNow Table API (the same endpoint the details page's attachment
-  // section is driven from) — no DOM. The API supplies file_name, content_type,
-  // and size_bytes, so name, type, and the byte-accurate size all come straight
-  // through (the DOM only shows human-readable labels like "1.2 MB", which the
-  // picker can't turn into byte math for the upload cutoff). When the API
-  // can't be reached (no sys_id in the URL, a 401/error, or a non-ServiceNow
-  // frame), the picker falls back to reading the attachment section's links
-  // with their human-readable size labels, so the single-ticket flow still
-  // lists files even without an API context.
   if (site.name === "Spark") {
-    // DOM fallback: the attachment section's links. Labels only carry
-    // human-readable sizes ("1.2 MB"), which feed the upload-cutoff math
-    // through attachmentByteSize's label parser.
+
     const domItems = () => {
       const items = [];
       if (!site.attachmentSelector) return items;
@@ -774,7 +644,7 @@ async function listTicketAttachmentsInPage(site) {
         try {
           url = new URL(href, location.href).href;
         } catch {
-          // Malformed href — skip this file rather than failing the picker.
+
           continue;
         }
         const ext = (name.split(".").pop() || "").toLowerCase();
@@ -816,10 +686,6 @@ async function listTicketAttachmentsInPage(site) {
         { credentials: "include", headers },
       );
       if (!response.ok) {
-        console.error(
-          `[jira-ext] Spark attachments API ${response.status} for ${sysId}`,
-          location.href,
-        );
         return domItems();
       }
       const json = await response.json();
@@ -843,24 +709,19 @@ async function listTicketAttachmentsInPage(site) {
             Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
         });
       }
-      // The API answered but reported nothing — trust the rendered markup
-      // (e.g. the sys_attachment table is empty for this user but the form
-      // still shows files).
+
       if (items.length) return items;
       return domItems();
-    } catch (err) {
-      console.error("[jira-ext] Spark attachments API failed:", err);
+    } catch {
       return domItems();
     }
   }
 
   return [];
-  } catch (err) {
-    console.error("[jira-ext] listTicketAttachmentsInPage failed:", err);
+  } catch {
     return [];
   }
 }
-
 
 export async function listTicketAttachmentsInTab(siteName) {
   const site = getSite(siteName);
@@ -874,21 +735,14 @@ export async function listTicketAttachmentsInTab(siteName) {
       target: { tabId: currentTab.id, allFrames: true },
       func: listTicketAttachmentsInPage,
       args: [site],
-      // Spark sizes come from the ServiceNow Table API, which only authenticates
-      // when the request is issued from the page's own context (MAIN world) —
-      // an isolated-world native fetch gets a 401 Basic challenge and Chrome
-      // then shows the Basic-auth dialog, which JS can't suppress. Octane's
-      // cookie-only API works fine from the isolated world.
+
       world: siteName === "Spark" ? "MAIN" : "ISOLATED",
     });
-  } catch (err) {
-    // Injection refused (restricted frame/URL) — the picker shows empty
-    // rather than failing the whole single-ticket flow.
-    console.error("[jira-ext] Attachment listing injection failed:", err);
+  } catch {
+
     return [];
   }
 
-  // Prefer the frame that actually found attachments, then any result.
   return (
     results.map((r) => r.result).find((r) => r && r.length > 0) ||
     (results[0] && results[0].result) ||
@@ -896,11 +750,6 @@ export async function listTicketAttachmentsInTab(siteName) {
   );
 }
 
-// Lists the attachment files of many selected listing rows at once (metadata
-// only — no bytes). Feeds the bulk-import picker so the user can check exactly
-// which files to upload across every selected ticket. Returns an array of
-// groups — { id, attachments: [{ name, size, sizeBytes, type }] } — one per
-// requested id. Runs in the page context, so it must be self-contained.
 async function listListingAttachmentsInPage(ids, siteName) {
   const VIDEO_EXTS = new Set([
     "mp4", "m4v", "mov", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg",
@@ -938,15 +787,10 @@ async function listListingAttachmentsInPage(ids, siteName) {
     return { name, sizeBytes, size: formatFileSize(sizeBytes), type: typeOf(name) };
   };
 
-  // Fetches one ticket's attachment metadata; resolves to its item array.
-  // A failed fetch just yields an empty group (the picker then shows the
-  // ticket without files rather than failing the whole listing).
   let fetchGroup;
 
   if (siteName === "Spark") {
-    // ServiceNow Table API, authenticated by the page's session cookie plus
-    // its CSRF token (X-UserToken) — runs in the MAIN world via the tab
-    // wrapper, so window.g_ck is visible and no Basic-auth challenge fires.
+
     const userToken =
       (typeof window !== "undefined" && window.g_ck) ||
       document.querySelector('meta[name="X-UserToken"]')?.content ||
@@ -970,12 +814,12 @@ async function listListingAttachmentsInPage(ids, siteName) {
           }
         }
       } catch {
-        // leave this ticket's group empty
+
       }
       return attachments;
     };
   } else {
-    // Octane: same REST API the create path uses, cookie-only.
+
     const contextMatch = /[?&]p=([^&#/]+\/[^&#]+)/.exec(location.search || "");
     if (!contextMatch) return [];
     const [sharedSpace, workspace] = contextMatch[1].split("/");
@@ -1000,22 +844,17 @@ async function listListingAttachmentsInPage(ids, siteName) {
           }
         }
       } catch {
-        // leave this ticket's group empty
+
       }
       return attachments;
     };
   }
 
-  // Fetched in parallel but written back into their original slots so the
-  // caller's position-based lookup still matches the requested ids.
   return Promise.all(
     idList.map(async (id) => ({ id, attachments: await fetchGroup(id) })),
   );
 }
 
-// Runs the multi-ticket listing above in the current tab. Spark executes in
-// the MAIN world (its Table API only authenticates from the page's own
-// context — see listTicketAttachmentsInTab); Octane stays isolated.
 export async function listListingAttachmentsInTab(ids, siteName) {
   const currentTab = await getCurrentTab();
 
@@ -1026,7 +865,6 @@ export async function listListingAttachmentsInTab(ids, siteName) {
     world: siteName === "Spark" ? "MAIN" : "ISOLATED",
   });
 
-  // Prefer the frame that actually found attachments, then any result.
   const outs = results.map((r) => r.result).filter(Boolean);
   return (
     outs.find((r) => r.some((g) => g.attachments?.length > 0)) ||
@@ -1035,9 +873,6 @@ export async function listListingAttachmentsInTab(ids, siteName) {
   );
 }
 
-// Runs the site scraper against an arbitrary tab. Used by the single-ticket
-// flow on the current tab and by the bulk flow on detail pages that are
-// opened in background tabs.
 export async function scrapeTab(tabId, siteName, options = {}) {
   const site = getSite(siteName);
 
@@ -1045,12 +880,6 @@ export async function scrapeTab(tabId, siteName, options = {}) {
     throw new Error(`Unknown site: ${siteName}`);
   }
 
-  // Scrape in every frame (the site's form may be in an iframe) and pick
-  // the first frame where the site's selectors matched and produced a title.
-  // Spark runs in the MAIN world: its Table API only authenticates when the
-  // request is issued from the page's own context (window.g_ck lives there) —
-  // an isolated-world native fetch gets a 401 Basic challenge, and Chrome then
-  // shows the Basic-auth dialog, which JS can't suppress.
   let results;
   try {
     results = await chrome.scripting.executeScript({
@@ -1059,10 +888,8 @@ export async function scrapeTab(tabId, siteName, options = {}) {
       args: [site, options],
       world: siteName === "Spark" ? "MAIN" : "ISOLATED",
     });
-  } catch (err) {
-    // Injection refused (restricted frame/URL) — treat as "no ticket open"
-    // rather than failing the flow.
-    console.error("[jira-ext] Scrape injection failed:", err);
+  } catch {
+
     return null;
   }
 
@@ -1078,12 +905,6 @@ async function getPageData(siteName, options = {}) {
   return scrapeTab(currentTab.id, siteName, options);
 }
 
-// --- Octane listing page ------------------------------------------------------
-// The "import from the current page" bulk flow reads the checkbox-selected
-// rows out of the Octane listing grid (SlickGrid) and returns each selected
-// item's detail-page URL so the extension can open + scrape it per ticket.
-
-// Runs in the page context: collects the grid rows the user ticked.
 function scrapeSelectedListingInPage() {
   const items = [];
 
@@ -1117,8 +938,6 @@ function scrapeSelectedListingInPage() {
   return items;
 }
 
-// Collects the checkbox-selected rows from the listing page in the current
-// tab. Returns [] when the tab isn't an Octane listing (or can't be read).
 export async function scrapeSelectedListingInTab() {
   const currentTab = await getCurrentTab();
 
@@ -1133,8 +952,6 @@ export async function scrapeSelectedListingInTab() {
   }
 }
 
-// Runs in the page context: returns the listing site name ("Octane"/"Spark")
-// when the active tab shows that site's listing grid, else null.
 export function detectListingInPage() {
   if (
     document.querySelector("div.slick-row") &&
@@ -1142,7 +959,7 @@ export function detectListingInPage() {
   ) {
     return "Octane";
   }
-  // ServiceNow incident list: rows are tr.list_row with a .formlink number link.
+
   const formlink = document.querySelector("a.linked.formlink");
   if (
     document.querySelector("tr.list_row") &&
@@ -1154,8 +971,6 @@ export function detectListingInPage() {
   return null;
 }
 
-// Runs in the tab's page context: computes both the details-page site and the
-// listing site in one pass.
 function detectTabStateInPage(sites) {
   const matches = (selector) => {
     try {
@@ -1167,8 +982,6 @@ function detectTabStateInPage(sites) {
 
   let site = null;
 
-  // Same URL-only Spark signal as detectInPage — an incident.do URL carrying a
-  // sys_id is a details page; no form fields are involved.
   const spark = sites.find((s) => s.name === "Spark");
   if (spark) {
     const searchAndHash = (location.search || "") + (location.hash || "");
@@ -1180,10 +993,6 @@ function detectTabStateInPage(sites) {
     }
   }
 
-  // Same URL-only Octane signal as detectInPage — the SPA never leaves the
-  // ticket in the location, and the entity-id header element isn't present on
-  // the listing page, so the workspace param alone marks Octane on both the
-  // listing and detail views.
   if (!site && /[?&]p=[^&#/]+\/[^&#]+/.test(location.search || "")) {
     site = "Octane";
   }
@@ -1202,9 +1011,6 @@ function detectTabStateInPage(sites) {
     }
   }
 
-  // Count the checked listing rows so the popup can tell a listing with
-  // nothing selected from a non-listing tab (both drive the dropzone's clear
-  // affordance, but only the former hides it).
   let selectedCount = 0;
   if (listing === "Octane") {
     document.querySelectorAll("div.slick-row").forEach((row) => {
@@ -1223,11 +1029,6 @@ function detectTabStateInPage(sites) {
   return { site, listing, selectedCount };
 }
 
-// One all-frames scan that detects both the details-page site and the listing
-// site. The single-ticket and listing flows both re-run on every tab/URL
-// change, so detecting them together halves the per-event page work. Tabs
-// that can never host a site (chrome://, file://, new-tab, …) are skipped
-// without injecting anything.
 export async function detectTabState() {
   const currentTab = await getCurrentTab();
   const url = (currentTab?.url || "").trim();
@@ -1242,8 +1043,6 @@ export async function detectTabState() {
       args: [SITES],
     });
 
-    // The main frame comes first: prefer its site match. Listing markup can
-    // live in a shell iframe, so take the first frame that found one.
     const site = results.map((r) => r.result?.site).find(Boolean) || null;
     const found =
       results.map((r) => r.result).find((r) => r && r.listing) || null;
@@ -1257,18 +1056,6 @@ export async function detectTabState() {
   }
 }
 
-// --- Spark (ServiceNow) listing page -----------------------------------------
-// Spark lists incidents in ServiceNow's list view. Each row is a tr.list_row
-// carrying the sys_id (row attribute, checkbox, or row id), the incident
-// number as a .formlink link, and the short description in the next column.
-//
-// The full description is taken straight from the list row DOM (the cell after
-// the short description, whose `title` tooltip holds the complete value). That
-// keeps the import on the user's active page session — no ServiceNow REST call,
-// so no Basic-auth prompt can ever appear.
-
-// Runs in the page context: collects the ServiceNow incident rows the user
-// ticked. Each returns { id, number, name, description, url }.
 function scrapeSelectedSparkListingInPage() {
   const items = [];
 
@@ -1285,10 +1072,6 @@ function scrapeSelectedSparkListingInPage() {
     const link = row.querySelector("a.linked.formlink");
     const number = link ? (link.textContent || "").trim() : "";
 
-    // The short description column sits right after the number link, and the
-    // description column right after that. The description cell renders the
-    // full value as a tooltip (newlines become tabs), so prefer its `title`
-    // attribute and fall back to the visible text.
     const numberCell = link ? link.closest("td") : null;
     const shortDescCell = numberCell ? numberCell.nextElementSibling : null;
     const descCell = shortDescCell ? shortDescCell.nextElementSibling : null;
@@ -1318,14 +1101,11 @@ function scrapeSelectedSparkListingInPage() {
   return items;
 }
 
-// Collects the checkbox-selected incident rows from the listing page in the
-// current tab. Returns [] when the tab isn't a Spark list (or can't be read).
 export async function scrapeSelectedSparkListingInTab() {
   const currentTab = await getCurrentTab();
 
   try {
-    // Scan every frame and use the one that actually holds selected rows —
-    // the ServiceNow list may live in a shell iframe.
+
     const results = await chrome.scripting.executeScript({
       target: { tabId: currentTab.id, allFrames: true },
       func: scrapeSelectedSparkListingInPage,
@@ -1339,8 +1119,6 @@ export async function scrapeSelectedSparkListingInTab() {
   }
 }
 
-// --- Listing detail via the same-origin REST API ----------------------------
-
 function fetchListingDetailsInPage(ids, site, options = {}) {
   const idList = Array.isArray(ids) ? ids : [ids];
   const includeAttachments = options.includeAttachments !== false;
@@ -1351,7 +1129,7 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
     const images = [];
     const plain = !/<[a-zA-Z][^>]*>/.test(String(html));
     if (plain) {
-      // Plain text comes back escaped so it can flow through htmlToADF.
+
       const escaped = String(html).replace(/[&<>"']/g, (c) => ({
         "&": "&amp;",
         "<": "&lt;",
@@ -1384,7 +1162,7 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
         images.push({ placeholder, dataUrl });
         imgEl.replaceWith(doc.createTextNode(placeholder));
       } catch {
-        // Couldn't fetch this image — drop it rather than aborting.
+
         imgEl.remove();
       }
     }
@@ -1405,10 +1183,6 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
   let itemUrl;
   let apiName;
 
-  // Bounded retry for transient failures — a flaky network dropping a detail
-  // fetch shouldn't fail the row. Runs in the page context, so it must be
-  // self-contained (no module imports). "Try again" statuses and every
-  // fetch-level rejection are retried with growing backoff.
   async function fetchWithRetry(url, options, tries = 2) {
     let lastError;
     for (let attempt = 0; attempt < tries; attempt++) {
@@ -1440,18 +1214,10 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
     apiName = "Spark API";
     itemUrl = (id) => `${location.origin}/nav_to.do?uri=incident.do?sys_id=${id}`;
 
-    // Only the frame that actually renders the incident list is a valid API
-    // context — any shell frames would just 404 on the wrong origin. Empty
-    // out instead of firing per-id fetches so allFrames scans stay cheap.
     if (!document.querySelector("tr.list_row")) {
       return { items: [] };
     }
 
-    // The listing DOM already carries each row's number, short description,
-    // and full description (as a tooltip) — no API involved. When the Table
-    // API is ACL-blocked (the same restriction that hides journal entries),
-    // this is the fallback that keeps the bulk import on the user's page
-    // session with no REST call.
     const readRowDom = (sysId) => {
       let row = null;
       document.querySelectorAll("tr.list_row").forEach((r) => {
@@ -1490,8 +1256,6 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
       return { row, checkbox, number, shortDescription, description };
     };
 
-    // The description tooltip is plain text; escape it so it can flow
-    // through htmlToADF exactly like the API path's plain-text description.
     const escapePlain = (value) =>
       String(value || "").replace(/[&<>"']/g, (c) => ({
         "&": "&amp;",
@@ -1501,11 +1265,6 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
         "'": "&#39;",
       })[c]);
 
-    // ServiceNow Table API, authenticated the same way the page itself does:
-    // the session cookie plus the page's CSRF token (window.g_ck) sent as
-    // X-UserToken. This instance enforces the token on API calls, so it's
-    // required even for GETs. Runs in the MAIN world (fetchListingDetailsInTab)
-    // so the page global is visible.
     const userToken =
       (typeof window !== "undefined" && window.g_ck) ||
       document.querySelector('meta[name="X-UserToken"]')?.content ||
@@ -1515,7 +1274,6 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
     const apiHeaders = { Accept: "application/json" };
     if (userToken) apiHeaders["X-UserToken"] = userToken;
 
-    // Downloads a file to a data URL over the same session+CSRF.
     async function sparkFetchToDataUrl(url, accept) {
       const headers = userToken ? { "X-UserToken": userToken } : {};
       if (accept) headers.Accept = accept;
@@ -1538,11 +1296,6 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
       }
     }
 
-    // The incident's attachment-list files (sys_attachment rows), e.g. what
-    // the details page shows under the attachment section. Only fetched when
-    // the bulk picker is enabled; the picker's selection narrows the files
-    // (an empty per-ticket selection means upload none, a missing entry is
-    // treated as "everything" as a defensive default).
     async function fetchSparkAttachments(incidentSysId) {
       if (!includeAttachments) return [];
       try {
@@ -1552,10 +1305,7 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
         );
         if (!response.ok) return [];
         const json = await response.json();
-        // The selection map is null when the picker was never loaded (include
-        // everything as a defensive default); when present, a ticket's entry —
-        // even an empty array — is authoritative: upload exactly its checked
-        // names, so a ticket with every file over the upload cap uploads none.
+
         const selectionMap = options.selectedAttachments;
         const selected = selectionMap
           ? new Set(selectionMap[String(incidentSysId)] || [])
@@ -1577,12 +1327,11 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
           `${location.origin}/api/now/table/incident/${encodeURIComponent(id)}?sysparm_fields=number,short_description,description&sysparm_display_value=false`,
           { credentials: "include", headers: apiHeaders },
         );
-      } catch (err) {
+      } catch {
         response = null;
       }
       if (!response || !response.ok) {
-        // API unavailable (ACL-blocked or 401) — fall back to the listing
-        // row DOM so the bulk import still works on the page session.
+
         const dom = readRowDom(String(id));
         if (dom) {
           return {
@@ -1606,9 +1355,6 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
       }
       const { html, images } = await captureImages(record.description);
 
-      // The details-page attachment list comes down too, mirroring the
-      // single-ticket scrape. Their placeholders aren't in the description
-      // HTML, so they upload as Jira attachments without being embedded.
       let next = images.length;
       const attachments = await fetchSparkAttachments(String(id));
       for (const att of attachments) {
@@ -1639,7 +1385,6 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
   } else {
     apiName = "Octane API";
 
-    // The Octane UI carries the current workspace in the URL as ?p=<sharedSpace>/<workspace>.
     const contextMatch = /[?&]p=([^&#]+)/.exec(location.search || "");
     if (!contextMatch) {
       return {
@@ -1666,17 +1411,10 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
       const data = await response.json();
       const { html, images } = await captureImages(data.description);
 
-      // The work item's attachment-list files, listed through the API and
-      // downloaded as data URLs (only when the bulk picker is enabled; the
-      // selection narrows which files). Their placeholders are appended to
-      // the html as <p> so they upload as embedded Jira attachments, matching
-      // the single-ticket Octane path.
       if (includeAttachments) {
         const query = `owner_work_item EQ {id EQ ${id}}`;
         const fields = "id,name,description,client_lock_stamp,size,exists";
-        // Same authoritative-selection semantics as the Spark path: a null
-        // map (picker never loaded) includes everything; a ticket's entry —
-        // even empty — includes exactly its checked names.
+
         const selectionMap = options.selectedAttachments;
         const selected = selectionMap
           ? new Set(selectionMap[String(id)] || [])
@@ -1723,7 +1461,7 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
               images.push({ placeholder, dataUrl, name: String(att.name) });
               html += `<p>${placeholder}</p>`;
             } catch {
-              // Couldn't fetch this file — drop it rather than aborting.
+
             }
           }
         };
@@ -1743,10 +1481,6 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
     };
   }
 
-  // Runs in the page context, so it must return a plain (serializable) value.
-  // Items are fetched through a small bounded pool, but written back into
-  // their original slots so the caller's position-based lookup still matches
-  // the requested ids.
   return (async () => {
     const items = new Array(idList.length);
     let next = 0;
@@ -1780,24 +1514,14 @@ function fetchListingDetailsInPage(ids, site, options = {}) {
   })();
 }
 
-// Fetches the selected items' details from the listing tab. Returns one entry
-// per id, each with an `error` string when that item couldn't load. Throws when
-// the page can't provide an API context at all (e.g. no ?p= for Octane).
 export async function fetchListingDetailsInTab(ids, site, options = {}) {
   const currentTab = await getCurrentTab();
 
-  // Scan every frame and keep the one that answered for real: the shell frame
-  // (wrong origin) yields items that all carry errors, so a result with at
-  // least one healthy item is preferred, then any result with items, then the
-  // first frame as a last resort.
   const results = await chrome.scripting.executeScript({
     target: { tabId: currentTab.id, allFrames: true },
     func: fetchListingDetailsInPage,
     args: [ids, site, options],
-    // Spark's Table API only authenticates when the request is issued from the
-    // page's own context (MAIN world) — the listing session is carried that
-    // way. An isolated-world native fetch gets a 401 Basic challenge, and
-    // Chrome then shows the Basic-auth dialog, which JS can't suppress.
+
     world: site === "Spark" ? "MAIN" : "ISOLATED",
   });
   const outs = results.map((r) => r.result).filter(Boolean);
@@ -1810,14 +1534,6 @@ export async function fetchListingDetailsInTab(ids, site, options = {}) {
   return out.items || [];
 }
 
-// Runs in the page context: fetches a Spark incident's journal entries (public
-// comments + internal work notes) through the ServiceNow Table API — no DOM
-// scraping. Journal entries are notoriously collapsed in the details DOM, so
-// sys_journal_field (the same endpoint the details page is driven from) is the
-// only reliable source. `ids` are the incidents' sys_ids; returns one group per
-// id, [{ id, comments: [{ kind, author, createdAt, text }] }], with comments
-// ordered oldest-first. A failed fetch yields an empty list for that incident
-// rather than failing the caller.
 async function fetchSparkCommentsInPage(ids) {
   const idList = Array.isArray(ids) ? ids : [ids];
 
@@ -1829,10 +1545,6 @@ async function fetchSparkCommentsInPage(ids) {
   const headers = { Accept: "application/json" };
   if (userToken) headers["X-UserToken"] = userToken;
 
-  // Splits the incident record's journal field value (delimited text of the
-  // form "{date} - {author} ({label})\n{text}\n\n{next entry}...") into
-  // individual { createdAt, author, text } entries. Continuation paragraphs
-  // that don't start with a header get folded into the previous entry.
   const parseJournalText = (raw) => {
     const entries = [];
     const withLabel = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+-\s+(.+?)\s+\(([^)]+)\)\s*$/;
@@ -1858,9 +1570,7 @@ async function fetchSparkCommentsInPage(ids) {
   };
 
   const fetchIncident = async (id) => {
-    // Method 1: structured journal rows, one per entry.
-    let entries = [];
-    let journalNote = "";
+    const entries = [];
     try {
       const response = await fetch(
         `${location.origin}/api/now/table/sys_journal_field?sysparm_query=element_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=element,value,sys_created_by,sys_created_on&sysparm_display_value=true&sysparm_limit=1000`,
@@ -1869,11 +1579,9 @@ async function fetchSparkCommentsInPage(ids) {
       if (response.ok) {
         const json = await response.json();
         const rows = Array.isArray(json?.result) ? json.result : [];
-        const seenElements = new Set();
         for (const row of rows) {
           const rawElement = String(row?.element || "").trim();
           if (!rawElement) continue;
-          seenElements.add(rawElement);
           const isPublic =
             rawElement === "comments" || rawElement === "additional_comments";
           const author = String(row?.sys_created_by || "").trim();
@@ -1886,37 +1594,20 @@ async function fetchSparkCommentsInPage(ids) {
             text,
           });
         }
-        journalNote = `journal_field=${entries.length} (${Array.from(seenElements).join(", ") || "no elements"})`;
-      } else {
-        journalNote = `journal_field HTTP ${response.status}`;
       }
-    } catch (err) {
-      journalNote = `journal_field threw (${String(err?.message || err).slice(0, 60)})`;
-    }
+    } catch {}
 
-    // Method 1b (GlideRecord): the REST Table API is ACL-blocked, but
-    // client-side GlideRecord wraps GlideAjax and runs server-side with
-    // elevated privileges — the same path the ServiceNow UI uses to render
-    // the activity stream.
     if (!entries.length && typeof GlideRecord !== "undefined") {
-      let grNote = "";
       try {
         await new Promise((resolve) => {
           const gr = new GlideRecord("sys_journal_field");
           gr.addQuery("element_id", id);
           gr.orderBy("sys_created_on");
           gr.setLimit(1000);
-          console.log(
-            `[jira-ext] glide_record: query element_id=${id}, hasQuery=${typeof gr.addQuery}, hasQueryFn=${typeof gr.query}, hasNext=${typeof gr.next}, hasGetVal=${typeof gr.getValue}`,
-          );
           gr.query(function () {
-            let count = 0;
-            const seenElements = new Set();
             while (gr.next()) {
-              count++;
               const rawElement = String(gr.getValue("element") || "").trim();
               if (!rawElement) continue;
-              seenElements.add(rawElement);
               const isPublic =
                 rawElement === "comments" ||
                 rawElement === "additional_comments";
@@ -1934,24 +1625,12 @@ async function fetchSparkCommentsInPage(ids) {
                 text,
               });
             }
-            console.log(
-              `[jira-ext] glide_record: callback done, cursorHits=${count}, entries=${entries.length}, elements=[${Array.from(seenElements).join(", ")}]`,
-            );
-            grNote = `glide_record=${entries.length} (${Array.from(seenElements).join(", ") || "no elements"})`;
             resolve();
           });
         });
-      } catch (err) {
-        grNote = `glide_record threw (${String(err?.message || err).slice(0, 60)})`;
-      }
-      journalNote += `, ${grNote}`;
+      } catch {}
     }
 
-    // Method 2 (fallback): the incident record's own journal fields carry the
-    // full history as delimited text when sysparm_display_value=true
-    // (ServiceNow KB0860915) — usable even where sys_journal_field is empty
-    // for the session.
-    let recordNote = "";
     if (!entries.length) {
       try {
         const response = await fetch(
@@ -1970,8 +1649,6 @@ async function fetchSparkCommentsInPage(ids) {
           ];
           for (const field of fields) {
             for (const entry of parseJournalText(rec?.[field])) {
-              // For the combined field the kind comes from the "(Work notes)"
-              // label; for the individual fields the field name decides.
               const isWork =
                 field === "work_notes" ||
                 (field === "comments_and_work_notes" &&
@@ -1984,22 +1661,12 @@ async function fetchSparkCommentsInPage(ids) {
             }
           }
           entries.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-        } else {
-          recordNote = `record HTTP ${response.status}`;
         }
-      } catch (err) {
-        recordNote = `record threw (${String(err?.message || err).slice(0, 60)})`;
-      }
+      } catch {}
     }
 
-    // Method 3 (DOM fallback): both API paths empty — journal entries are
-    // visible in the ServiceNow UI but ACL-blocked over the REST API. This
-    // function runs inside every frame (allFrames: true), so whichever frame
-    // contains the incident form's Updates tab gets its entries scraped.
     if (!entries.length) {
       try {
-        // Only journal entries (Work notes / Additional comments) carry
-        // data-journal-id; emails, field changes, and image uploads don't.
         for (const li of document.querySelectorAll("li[data-journal-id]")) {
           const author =
             li.querySelector(".sn-card-component-createdby")?.textContent
@@ -2025,23 +1692,10 @@ async function fetchSparkCommentsInPage(ids) {
             text,
           });
         }
-        if (entries.length) {
-          console.log(
-            `[jira-ext] spark journal ${id}: DOM scrape found ${entries.length} journal entries`,
-          );
-        }
-      } catch (err) {
-        console.log(`[jira-ext] spark journal ${id} DOM scrape threw:`, err);
-      }
+      } catch {}
     }
 
-    // Method 4 (detail-page fetch): a listing page never renders the activity
-    // stream — `li[data-journal-id]` only exists once the incident's own form
-    // page is open. But that form HTML is reachable over the same session+CSRF
-    // (no Table API, so no ACL restriction), so fetch it and parse the stream
-    // out of the response instead of scraping the listing DOM.
     if (!entries.length) {
-      let pageNote = "";
       try {
         const response = await fetch(
           `${location.origin}/incident.do?sys_id=${encodeURIComponent(id)}`,
@@ -2077,23 +1731,12 @@ async function fetchSparkCommentsInPage(ids) {
               text,
             });
           }
-          pageNote = `page fetch=${entries.length} entries`;
-        } else {
-          pageNote = `page fetch HTTP ${response.status}`;
         }
       } catch (err) {
-        pageNote = `page fetch threw (${String(err?.message || err).slice(0, 60)})`;
-      }
-      if (pageNote) {
-        console.log(`[jira-ext] spark journal ${id}: ${pageNote}`);
+        String(err?.message || err);
       }
     }
 
-    // Sort chronologically (oldest first) so Jira's comment list reads as a
-    // history — comment #1 is the oldest journal entry. The ServiceNow DOM
-    // lists newest-first, so without this sort Jira shows the newest entry
-    // at the top. Handles the DOM's European DD/MM/YYYY dates and the API's
-    // YYYY-MM-DD timestamps alike.
     const parseDate = (value) => {
       const m = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/.exec(
         String(value || "").trim(),
@@ -2104,14 +1747,9 @@ async function fetchSparkCommentsInPage(ids) {
     };
     entries.sort((a, b) => parseDate(a.createdAt) - parseDate(b.createdAt));
 
-    console.log(
-      `[jira-ext] spark journal ${id}: ${entries.length} entries — ${journalNote}${recordNote ? `, ${recordNote}` : ""}`,
-    );
     return entries;
   };
 
-  // Fetched in parallel but written back into their original slots so the
-  // caller's position-based lookup still matches the requested ids.
   const groups = new Array(idList.length);
   let next = 0;
   const worker = async () => {
@@ -2129,10 +1767,6 @@ async function fetchSparkCommentsInPage(ids) {
   return groups;
 }
 
-// Runs fetchSparkCommentsInPage in the current tab. Spark's Table API only
-// authenticates from the page's own context (MAIN world) — the CSRF token
-// (window.g_ck) lives there, and an isolated-world fetch would fire the
-// Basic-auth challenge. Prefers the frame that actually returned comments.
 export async function fetchSparkCommentsInTab(ids) {
   const currentTab = await getCurrentTab();
   const idList = Array.isArray(ids) ? ids : [ids];
@@ -2154,9 +1788,6 @@ export async function fetchSparkCommentsInTab(ids) {
     outs
       .filter((g) => Array.isArray(g) && g.length > 0)
       .sort((a, b) => countComments(b) - countComments(a))[0] || [];
-  console.log(
-    `[jira-ext] fetchSparkCommentsInTab: ${outs.length} frames returned data, picked one with ${countComments(best)} comments`,
-  );
   return best;
 }
 

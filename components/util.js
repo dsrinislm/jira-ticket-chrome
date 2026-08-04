@@ -8,7 +8,6 @@ export function debounce(fn, delay) {
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Compact human-readable byte count (e.g. 12.4 MB) for upload progress labels.
 export function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];

@@ -55,9 +55,7 @@ export function handleFileSelected() {
 
       loadBulkRows(parsed.rows, parsed.site);
       dropzoneHint.innerHTML = `<span class="dropzone-switch-hint">Click to select different report</span><br/><span class="dropzone-clear-hint">Click clear to switch to ${parsed.site} importing</span>`;
-      // Re-derive the listing state from the tab: the clear affordance only
-      // helps when a site import can actually run, and the listing-only
-      // controls stay hidden while the report is loaded.
+
       detectTabState().then(({ listing, selectedCount }) =>
         applyListingState(listing, selectedCount),
       );
@@ -102,8 +100,7 @@ export async function downloadPreviewReport() {
 
       buildReport(workbook, rows);
     } else {
-      // No source file (listing page flow) — build a fresh report from the
-      // preview rows themselves.
+
       workbook = buildOctaneReportWorkbook(ExcelJS, state.bulkRows);
     }
 
@@ -116,17 +113,11 @@ export async function downloadPreviewReport() {
       `${siteTag}_jira_export_${stamp}.${state.importExt || "xlsx"}`,
       await workbook.xlsx.writeBuffer(),
     );
-  } catch (err) {
-    console.error("ExcelJS export failed:", err);
+  } catch {
     setStatus("Couldn't download the report.", "error");
   }
 }
 
-// Builds a Status/<ID-or-Number>/<Name-or-Short description>/Description
-// workbook straight from the preview rows when there is no source file to
-// stamp (the listing page import flow). The header schema follows the row
-// site so the export round-trips: re-importing a Spark report is detected
-// as Spark (Number/Short description) instead of being misread as Octane.
 function buildOctaneReportWorkbook(ExcelJS, bulkRows) {
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Report");

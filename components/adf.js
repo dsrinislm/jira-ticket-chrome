@@ -1,7 +1,5 @@
-// ADF (Atlassian Document Format) builders and attachment helpers.
 
-// Plain-text Description column -> ADF. Blank lines separate paragraphs;
-// single newlines become hard breaks (ADF has no bare "\n" semantics).
+
 function textToADF(text) {
   const normalized = String(text ?? "")
     .replace(/\r\n/g, "\n")
@@ -27,7 +25,6 @@ function textToADF(text) {
   return { version: 1, type: "doc", content };
 }
 
-// The "SOURCE TICKET URL" block both ticket flows prepend to the body.
 export function sourceUrlBlock(url) {
   return [
     {
@@ -49,9 +46,6 @@ export function sourceUrlBlock(url) {
   ];
 }
 
-// ADF for bulk rows: the SOURCE TICKET URL header built from the Excel
-// "ID" column, followed by the Description column as plain-text
-// paragraphs. No ID -> description only.
 export function buildIssueDescription(sourceUrl, description) {
   const bodyAdf = textToADF(description);
   return {
@@ -61,7 +55,6 @@ export function buildIssueDescription(sourceUrl, description) {
   };
 }
 
-// Converts a `data:` URL into a Blob for multipart upload.
 export function dataUrlToBlob(dataUrl) {
   const [header, base64] = dataUrl.split(",");
   const mime =
@@ -85,8 +78,6 @@ export function fileMediaNode(attachment) {
   };
 }
 
-// Swaps `__JIRA_IMG_n__` placeholder paragraphs for the real uploaded
-// attachment's media node.
 export function insertUploadedImages(adfContent, byPlaceholder) {
   return adfContent.flatMap((node) => {
     if (

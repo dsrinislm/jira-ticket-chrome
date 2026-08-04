@@ -3,14 +3,6 @@ import { sleep } from "./util.js";
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
-// Wraps fetch with a single bounded retry for transient failures: network
-// drops (a TypeError — what browsers surface as "Failed to fetch") and the
-// statuses that usually mean "try again" (rate limit, gateway hiccup). One
-// retry keeps a genuinely dead server from stalling the import.
-// `retryStatus` is off for non-idempotent writes (issue create, attachment
-// upload) where a re-send could duplicate — those still retry the
-// network-level rejection, which almost always means the request never
-// reached the server.
 async function fetchWithRetry(
   url,
   options = {},
@@ -115,8 +107,7 @@ function escapeJqlString(value) {
 async function searchByJql(jiraBaseUrl, jql, matches) {
   let response;
   try {
-    // Jira deprecated GET /rest/api/3/search in favor of the enhanced
-    // JQL search endpoint — use that here.
+
     response = await jiraFetch(jiraBaseUrl, "/rest/api/3/search/jql", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -136,14 +127,6 @@ async function searchByJql(jiraBaseUrl, jql, matches) {
   return { error: false, issue: match || null };
 }
 
-// Duplicate detection. Single-ticket titles are "SITE | ID | description";
-// the ID is the stable dedup key — the description part can drift between
-// imports (e.g. a Spark ticket's short description edited in the meantime),
-// which is why exact-title-only matching re-created Spark tickets.
-//
-// Strategy: exact summary match first; if the title is site-prefixed, also
-// search by the source ID and accept an issue that carries both the site
-// and the ID in its summary.
 async function findExistingJiraIssue(jiraBaseUrl, projectKey, summary) {
   const target = String(summary ?? "").trim();
   if (!target) return { error: false, issue: null };
@@ -198,8 +181,7 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
       },
       body: JSON.stringify(payload),
     },
-    // Re-sending a create could duplicate the issue if the server actually
-    // processed the first attempt — retry the network drop, not HTTP errors.
+
     { retryStatus: false },
   );
 
@@ -228,12 +210,6 @@ async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
   return responseData;
 }
 
-// Jira decides each attachment's type from the multipart part's Content-Type
-// and the filename's extension. QA sites frequently serve attachments (BMP
-// images on ServiceNow, MP4/MOV videos on Octane) with a generic or missing
-// Content-Type, so the blob carries e.g. `application/octet-stream` and Jira
-// drops the file as unknown. When that happens, re-type the blob from the
-// filename's extension.
 const FILE_TYPE_BY_EXT = {
   bmp: "image/bmp",
   jpg: "image/jpeg",
@@ -268,13 +244,6 @@ const FILE_TYPE_BY_EXT = {
   txt: "text/plain",
 };
 
-// The attachment upload uses XHR instead of fetch because fetch can't report
-// upload progress — XHR's upload.onprogress can. Same auth model (cookies via
-// withCredentials + X-Atlassian-Token) and the same single network-level retry
-// as fetchWithRetry; the browser sets the multipart boundary for the FormData.
-// `onProgress(loaded, total)` is called with the request's cumulative bytes,
-// and `onXhr(xhr)` hands the live XHR to the caller so it can be aborted
-// (e.g. by the sync progress bar's Stop button).
 function xhrUpload(url, blob, filename, onProgress, onXhr) {
   return new Promise((resolve, reject) => {
     const formData = new FormData();
@@ -293,9 +262,7 @@ function xhrUpload(url, blob, filename, onProgress, onXhr) {
       let data = null;
       try {
         data = JSON.parse(xhr.responseText);
-      } catch {
-        // Non-JSON body — e.g. a gateway error page behind the 401/413.
-      }
+      } catch {}
       resolve({
         ok: xhr.status >= 200 && xhr.status < 300,
         status: xhr.status,
@@ -324,7 +291,7 @@ async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename, onPro
       response = await xhrUpload(url, blob, filename, onProgress, onXhr);
       break;
     } catch (err) {
-      // A Stop click aborts the request — never retry a user-initiated cancel.
+
       if (err.name === "AbortError") throw err;
       if (attempt === 0) {
         await sleep(300 + Math.random() * 200);
@@ -338,17 +305,7 @@ async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename, onPro
 
   if (!response.ok) {
     if (response.status === 401) {
-      // A 401 on an attachment upload is not always the size gateway: Jira's
-      // API also answers 401 for session/permission problems, and it says so
-      // with a JSON error message. The edge proxy that rejects oversized
-      // request bodies (~25-30 MB) instead returns 401 with a plain error
-      // page (no JSON). Only claim "too large" when the file is actually at
-      // the size ceiling — a 5 MB file failing with a 401 is an auth/session
-      // problem, not something the user can fix by splitting the file.
-      console.warn(
-        `Jira attachment upload 401: file="${filename}" bytes=${blob.size} status=${response.status}`,
-        response.raw && String(response.raw).slice(0, 300),
-      );
+
       const jiraMessage =
         response.data?.errorMessages?.[0] ||
         response.data?.error ||
@@ -372,7 +329,7 @@ async function uploadJiraAttachment(jiraBaseUrl, issueKey, blob, filename, onPro
   if (!Array.isArray(response.data) || !response.data[0]) {
     throw new Error("Image upload returned an unexpected response.");
   }
-  return response.data[0]; // { id, filename, ... }
+  return response.data[0];
 }
 
 async function updateJiraIssueDescription(jiraBaseUrl, issueKey, contentNodes) {
@@ -381,12 +338,6 @@ async function updateJiraIssueDescription(jiraBaseUrl, issueKey, contentNodes) {
       description: { version: 1, type: "doc", content: contentNodes },
     },
   });
-  const url = `${jiraBaseUrl}/rest/api/3/issue/${issueKey}`;
-
-  // The description embeds media nodes that reference attachments uploaded a
-  // moment ago; Jira can 400 transiently while that upload is still being
-  // indexed, so give it a beat and retry before reporting a failure. The PUT
-  // is idempotent (same description content), so a re-send is safe.
   let response;
   for (let attempt = 0; attempt < 3; attempt++) {
     response = await jiraFetch(
@@ -404,9 +355,6 @@ async function updateJiraIssueDescription(jiraBaseUrl, issueKey, contentNodes) {
   throw new Error(`Attaching images failed (status ${response.status}).`);
 }
 
-// Returns the filenames already attached to a Jira issue. Used when a
-// partially-failed create is retried so only the attachments that are
-// actually missing get uploaded — never re-uploading what's already there.
 async function listIssueAttachments(jiraBaseUrl, issueKey) {
   const response = await jiraFetch(
     jiraBaseUrl,
@@ -418,9 +366,6 @@ async function listIssueAttachments(jiraBaseUrl, issueKey) {
   return Array.isArray(attachments) ? attachments.map((a) => a.filename) : [];
 }
 
-// Extracts plain text out of an Atlassian Document Format body so the
-// first-line comment dedup works on Jira Cloud (its REST API returns `body`
-// as ADF, never as the plain string that was originally posted).
 function textToAdf(text) {
   if (typeof text !== "string") text = String(text ?? "");
   const lines = text.split("\n");
@@ -447,8 +392,6 @@ function adfToText(node) {
     .join(isBlock ? "\n" : "");
 }
 
-// Lists an issue's existing comment bodies (plain text). Used to dedupe
-// source comments on re-runs so a sync never duplicates what's already there.
 async function listJiraComments(jiraBaseUrl, issueKey) {
   const response = await jiraFetch(
     jiraBaseUrl,
@@ -466,10 +409,6 @@ async function listJiraComments(jiraBaseUrl, issueKey) {
   });
 }
 
-// Adds one plain-text comment to a Jira issue. Each source journal entry
-// becomes its own comment — never merged with the others. The request is not
-// retried on HTTP statuses (a re-send could duplicate the comment); only the
-// network-level drop is retried once.
 async function addJiraComment(jiraBaseUrl, issueKey, body) {
   const response = await jiraFetch(
     jiraBaseUrl,

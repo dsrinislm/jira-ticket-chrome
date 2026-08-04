@@ -8,8 +8,6 @@ import {
   refreshSingleViewStatus,
 } from "./ui.js";
 
-// Single round trip to storage on popup open instead of two separate
-// get() calls (settings + project history) racing independently.
 export function loadInitialState() {
   chrome.storage.local.get(
     ["jiraBaseUrl", "projectKey", "sourceSite", "projectHistory"],
@@ -17,27 +15,17 @@ export function loadInitialState() {
       if (data.jiraBaseUrl) jiraBaseUrlInput.value = data.jiraBaseUrl;
       if (data.projectKey) projectKeyInput.value = data.projectKey;
       if (data.sourceSite) setSourceSite(data.sourceSite);
-      // Don't validate/show errors here — the user hasn't touched the
-      // field yet, so this only takes effect after blur.
 
       renderProjectHistory(data.projectHistory || []);
 
-      // Restored fields may change the idle status: a stale "Configure Jira
-      // details…" must not linger once saved details are loaded.
       refreshSingleViewStatus();
 
-      // Accessibility: when no Jira details are configured yet, land focus on
-      // the Base URL field so keyboard / screen-reader users start on the
-      // first required input instead of the document body.
       if (!jiraBaseUrlInput.value.trim() && !projectKeyInput.value.trim()) {
         jiraBaseUrlInput.focus();
       }
     },
   );
 
-  // "Include attachments" is a per-action choice: it must be (re)checked by
-  // the user, so it's never persisted or restored. Drop any value a previous
-  // version saved so it can't linger and silently re-enable.
   chrome.storage.local.remove("includeAttachments");
 }
 
@@ -77,7 +65,7 @@ export function renderProjectHistory(projects) {
   projects.forEach((project) => {
     const tag = document.createElement("div");
     tag.className = "project-tag";
-    // project keys are persisted user input — escape before injecting.
+
     tag.innerHTML = `
       <span class="tag-text">${escapeHtml(project)}</span>
       <span class="tag-close" title="Remove">✕</span>

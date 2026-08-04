@@ -1,8 +1,5 @@
 const el = (id) => document.getElementById(id);
 
-// DOM references, shared mutable state, and view/UI helpers. Imported by
-// every module that touches the popup, so it must not import anything else.
-
 export const statusDiv = el("status");
 export const statusText = el("statusText");
 export const ticketResult = el("ticketResult");
@@ -32,10 +29,6 @@ export const bulkAttachmentGroups = el("bulkAttachmentGroups");
 export const bulkAttachmentSelectAll = el("bulkAttachmentSelectAll");
 export const bulkAttachmentNote = el("bulkAttachmentNote");
 
-// Both pickers' "Choose attachments" headers are collapsible: clicking the
-// title hides the file list (and note) so the section stays slim during
-// creation, without changing the stored selection. Collapsing is purely
-// visual, so it's wired here at module scope alongside the refs.
 for (const picker of [attachmentPicker, bulkAttachmentPicker]) {
   const collapseBtn = picker?.querySelector(".attachment-picker-collapse");
   collapseBtn?.addEventListener("click", () => {
@@ -44,10 +37,6 @@ for (const picker of [attachmentPicker, bulkAttachmentPicker]) {
   });
 }
 
-// Re-expands a picker (fresh render after a re-enable should show the list,
-// even if an earlier run auto-collapsed it). Skipped while the flow is busy
-// so a slow async list arriving mid-creation can't pop the picker open again
-// over the upload progress.
 function expandAttachmentPicker(picker) {
   if (!picker) return;
   const busy =
@@ -69,10 +58,6 @@ export function setIncludeAttachments(checked) {
   includeAttachmentsInput.checked = Boolean(checked);
 }
 
-// The picker's selection: null means "not chosen / include everything" (the
-// picker was never loaded, e.g. the user created the ticket before the list
-// came back), an empty array means the user deselected every file, and a
-// non-empty array holds the file names to upload.
 export function getSelectedAttachments() {
   return state.attachmentSelection;
 }
@@ -97,64 +82,36 @@ export function clearAttachmentPicker() {
   setAttachmentSyncProgress(false);
   attachmentSelectAll.checked = true;
   state.attachmentSelection = null;
-  // Turning the picker off means the "fully synced" verdict no longer holds —
-  // re-show the Create/Sync CTA and re-enable the toggle.
+
   syncedTicketFound = false;
   updateAttachmentIncludeSyncState();
 }
 
-// Shows/hides the inline spinner next to the "Include attachments" toggle.
-// Used only while the popup is querying Jira for already-synced files.
 export function setAttachmentSyncProgress(visible) {
   const el = document.getElementById("attachmentSyncProgress");
   if (!el) return;
   el.hidden = !visible;
 }
 
-// Set while the picker shows the "No attachments found." message — treated as
-// "nothing to upload", so the include toggle gets marked checked + disabled.
 let attachmentPickerHasNoAttachments = false;
 
-// True while the picker knows the source ticket already exists on Jira (found
-// by the handshake). Combined with "every listed attachment already synced",
-// that means the Create/Sync CTA has nothing left to do — the UI hides the
-// button and points the user at a fresh ticket instead.
 let syncedTicketFound = false;
 
-// True once the Create/Sync CTA has actually run and rendered the ticket card
-// (renderTicketCard) for the current ticket session. The "fully synced" verdict
-// only hides the CTA once the card is on screen — the include-toggle handshake
-// alone finding the ticket isn't enough, because the user may still want to
-// click the CTA to retrieve the existing ticket.
 let ticketCardShown = false;
 
-// Records whether the picker's handshake located the source ticket on Jira.
-// Re-evaluates the include-toggle + Create/Sync CTA state right away so a
-// fully-synced verdict can hide the button the moment it's known.
 export function setSyncedTicketFound(found) {
   syncedTicketFound = Boolean(found);
   updateAttachmentIncludeSyncState();
 }
 
-// Marks the start of a fresh Create/Sync run or a navigation to a new ticket:
-// clears the previous ticket card and forgets it was rendered, so the "fully
-// synced" CTA-hide only re-applies once the new card is actually on screen.
 export function resetTicketCard() {
   ticketCardShown = false;
   if (ticketResult) ticketResult.innerHTML = "";
   updateAttachmentIncludeSyncState();
 }
 
-// Jira Cloud's gateway rejects attachment uploads above ~25 MB with a 401
-// (documented Atlassian bug JRACLOUD-75756), so the picker never lists files
-// over this size — attempting them would only fail at upload time. The cutoff
-// is 26 MB, not 25, because a 25 MB file can round up past the byte math and
-// upload fine; only strictly-larger files are reliably rejected.
 export const MAX_ATTACHMENT_UPLOAD_BYTES = 26 * 1024 * 1024;
 
-// Byte size of a picker item: prefers the API-reported sizeBytes and falls
-// back to parsing the formatted size string (listings that couldn't reach an
-// API — e.g. a Spark page with no sys_id — only have the label).
 export function attachmentByteSize(item) {
   const bytes = Number(item?.sizeBytes);
   if (Number.isFinite(bytes) && bytes >= 0) return bytes;
@@ -169,16 +126,12 @@ export function attachmentByteSize(item) {
   return Number(m[1]) * mult;
 }
 
-// The picker note ("n files over 25 MB skipped…"); an empty message hides it.
 export function setAttachmentNote(message) {
   if (!attachmentNote) return;
   attachmentNote.hidden = !message;
   attachmentNote.textContent = message || "";
 }
 
-// Refreshes the single-ticket idle status from the Jira fields. Shared by the
-// popup's prompt/input handlers and storage's load so the message never goes
-// stale (e.g. still saying "Configure Jira details…" after details load).
 export function refreshSingleViewStatus() {
   if (bulkView.hidden) {
     const configured =
@@ -209,10 +162,6 @@ function formatBytes(bytes) {
   return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
 }
 
-// items: [{ name, size, sizeBytes, type }]; syncedNames: a Set of filenames
-// already on Jira for this ticket. Already-synced files stay checked but
-// disabled (grayed) and are left out of the selection — the sync only
-// re-uploads what's actually missing. Mirrors renderBulkAttachmentPicker.
 export function renderAttachmentPicker(items, syncedNames = new Set()) {
   attachmentPicker.hidden = false;
   expandAttachmentPicker(attachmentPicker);
@@ -248,9 +197,7 @@ export function renderAttachmentPicker(items, syncedNames = new Set()) {
 
     for (const item of list) {
       const alreadySynced = syncedNames.has(item.name);
-      // Every rendered (non-synced) file starts checked — its name is part
-      // of the selection from the start. The picker initializes the selection
-      // to exactly these names; an empty array would mean "upload nothing".
+
       if (!alreadySynced) state.attachmentSelection.push(item.name);
       const row = document.createElement("label");
       row.className = "attachment-item" + (alreadySynced ? " attachment-item-synced" : "");
@@ -301,15 +248,8 @@ export function renderAttachmentPicker(items, syncedNames = new Set()) {
   updateAttachmentIncludeSyncState();
 }
 
-// True while the single-ticket flow is running (setBusy). The select-all
-// toggle is hidden during that whole run — choosing attachments mid-upload is
-// pointless, and the picker is collapsed to keep progress front and center.
 let singleBusy = false;
 
-// Keeps the picker's global select-all in step with the attachment checkboxes,
-// looking only at files that still need syncing (disabled ones are ignored).
-// The toggle is hidden while a run is in flight and when there are no
-// attachments, or when every attachment is already uploaded to Jira.
 function updateAttachmentSelectAll() {
   if (!attachmentSelectAll) return;
   const allBoxes = attachmentGroups.querySelectorAll(
@@ -319,17 +259,14 @@ function updateAttachmentSelectAll() {
   const boxes = attachmentGroups.querySelectorAll(
     ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
   );
-  // Nothing left to select — either a run is in flight, there are no
-  // attachments at all, or every one is already uploaded (disabled). Drop the
-  // Select-all toggle entirely.
+
   const toggle = attachmentSelectAll.closest(".attachment-picker-toggle");
   toggle?.classList.toggle("hidden", singleBusy || boxes.length === 0);
   let checked = 0;
   for (const box of boxes) if (box.checked) checked++;
 
   if (boxes.length === 0) {
-    // Every attachment is already on Jira (or none exist) — keep the toggle
-    // disabled+checked underneath so a later re-render starts consistent.
+
     attachmentSelectAll.checked = allBoxes.length > 0;
     attachmentSelectAll.disabled = allBoxes.length > 0;
     attachmentSelectAll.indeterminate = false;
@@ -340,12 +277,6 @@ function updateAttachmentSelectAll() {
   attachmentSelectAll.indeterminate = checked > 0 && checked < boxes.length;
 }
 
-// Reflects "everything already on Jira" back onto the Include-attachments
-// toggle: when every listed attachment is already synced — found via the Jira
-// handshake, or after a sync uploaded them — the toggle is marked checked +
-// disabled. The picker is left in whatever collapsed/expanded state it's in:
-// a run auto-collapses it for upload progress and it must NOT pop back open
-// after completion. Otherwise the toggle is left enabled for the user.
 function updateAttachmentIncludeSyncState() {
   if (!includeAttachmentsInput) return;
   const allBoxes = attachmentGroups.querySelectorAll(
@@ -364,13 +295,6 @@ function updateAttachmentIncludeSyncState() {
     includeAttachmentsInput.disabled = false;
   }
 
-  // When the CTA has already run and rendered the ticket card for a ticket
-  // that's fully synced on Jira — the handshake found it AND every listed
-  // attachment is already uploaded — there's nothing left to do. Hide the
-  // whole button group (not just the button — an empty group keeps its
-  // margin and would leave a gap) and tell the user to move on to a fresh
-  // ticket. Until the card is actually on screen the CTA stays clickable so
-  // the user can retrieve the existing ticket.
   const fullySyncedTicket = syncedTicketFound && allSynced && ticketCardShown;
   const buttonGroup = createTicketBtn?.closest(".button-group");
   if (buttonGroup) {
@@ -381,11 +305,6 @@ function updateAttachmentIncludeSyncState() {
   }
 }
 
-// After a single-ticket sync uploads files, marks the attachment names that
-// were actually uploaded to Jira as synced (checked + disabled) in the open
-// picker, so a re-run reflects what the sync just did. Embedded description
-// images are unaffected — their synthetic names never match a picker row.
-// uploadedNames: [filename, ...].
 export function markAttachmentsSynced(uploadedNames) {
   if (!attachmentGroups || !uploadedNames?.length) return;
   for (const name of uploadedNames) {
@@ -410,24 +329,14 @@ export function markAttachmentsSynced(uploadedNames) {
   updateAttachmentIncludeSyncState();
 }
 
-// --- Bulk-import attachment picker ------------------------------------------
-// One group per selected ticket; the user checks which files to upload across
-// all of them. Selection is kept in state.bulkAttachmentSelection[ticketId] =
-// [names], so runListingImport can pass exactly the checked files.
-
 export function getBulkIncludeAttachments() {
   return Boolean(bulkIncludeAttachments?.checked);
 }
 
-// The bulk picker's selection map ({ [ticketId]: [names] }), or null when the
-// picker was never loaded (toggle off / listing failed) — callers treat null
-// as "include everything", matching the single-ticket semantics.
 export function getBulkSelectedAttachments() {
   return state.bulkAttachmentSelection;
 }
 
-// The bulk attachment section only makes sense while a listing is detected
-// (the Excel flow has no attachment source), so detection shows/hides it.
 export function setBulkAttachmentSectionVisible(visible) {
   if (!bulkAttachmentSection) return;
   bulkAttachmentSection.style.display = visible ? "block" : "none";
@@ -438,21 +347,12 @@ export function setBulkAttachmentSectionVisible(visible) {
   }
 }
 
-// Collapses the preview table while the bulk attachment picker is open (the
-// toggle is checked) so the file picker stays front and center. The table
-// re-expands the moment rows are added again — an import must show progress.
-// The toolbar (and its manual collapse button) stays visible either way, and
-// the button's aria-expanded mirrors the state.
 export function setBulkPreviewCollapsed(collapsed) {
   if (!previewSection) return;
   previewSection.classList.toggle("preview-collapsed", Boolean(collapsed));
   previewCollapseBtn?.setAttribute("aria-expanded", String(!collapsed));
 }
 
-// Glides the preview table so `row.tr` sits at the top of its scroll area,
-// just below the sticky column header. Used during a sync so the most
-// recently created/synced ticket stays in view — the workers finish out of
-// order, so this re-pins (smoothly) each freshly finished row.
 export function scrollBulkRowTop(row, smooth = true) {
   if (!tableWrap || !row?.tr) return;
   const thead = tableWrap.querySelector("thead");
@@ -463,10 +363,6 @@ export function scrollBulkRowTop(row, smooth = true) {
   });
 }
 
-// Pins the preview table to the top item of the currently selected batch
-// (the first ticked, importable row) — not the table's literal first row, so
-// a selection that starts further down still opens at its own first item.
-// Falls back to the table top when nothing is ticked.
 export function scrollBulkToFirstSelected() {
   if (!tableWrap) return;
   const first = state.bulkRows.find(
@@ -476,8 +372,6 @@ export function scrollBulkToFirstSelected() {
   else scrollBulkTableTop();
 }
 
-// Scrolls the preview table back to its first row. Used at the start of a
-// run (so the sync follows from the top) and when a sync finishes.
 export function scrollBulkTableTop(smooth = false) {
   if (!tableWrap) return;
   tableWrap.scrollTo({ top: 0, behavior: smooth ? "smooth" : "auto" });
@@ -489,8 +383,6 @@ export function setBulkAttachmentNote(message) {
   bulkAttachmentNote.textContent = message || "";
 }
 
-// Shows/hides the inline spinner next to the "Include attachments" toggle.
-// Used only while the popup is querying Jira for already-synced files.
 export function setBulkAttachmentSyncProgress(visible) {
   const el = document.getElementById("bulkAttachmentSyncProgress");
   if (!el) return;
@@ -519,11 +411,6 @@ export function clearBulkAttachmentPicker() {
   state.bulkAttachmentSelection = null;
 }
 
-// groups: [{ id, attachments: [{ name, size, sizeBytes, type }] }]; labels:
-// { [id]: display text for the group title } (e.g. the INC number for Spark);
-// syncedMap: { [id]: Set<name> } of attachment names already on Jira for that
-// ticket. Already-synced files stay checked but disabled (grayed) and are left
-// out of the selection — the import only re-uploads what's actually missing.
 export function renderBulkAttachmentPicker(groups, labels = {}, syncedMap = {}) {
   if (!bulkAttachmentPicker) return;
   bulkAttachmentPicker.hidden = false;
@@ -548,7 +435,7 @@ export function renderBulkAttachmentPicker(groups, labels = {}, syncedMap = {}) 
 
     const ticketId = String(group.id);
     const synced = syncedMap[ticketId] || new Set();
-    // Only files that still need uploading are part of the selection.
+
     const selectable = files.filter((f) => !synced.has(f.name));
     state.bulkAttachmentSelection[ticketId] = selectable.map((f) => f.name);
 
@@ -561,8 +448,6 @@ export function renderBulkAttachmentPicker(groups, labels = {}, syncedMap = {}) 
     );
     const totalSize = formatBytes(totalBytes);
 
-    // A checkbox on the ticket number checks/unchecks all of this ticket's
-    // remaining files (already-synced ones stay disabled).
     const title = document.createElement("div");
     title.className = "attachment-group-title";
     const groupCheckbox = document.createElement("input");
@@ -592,8 +477,6 @@ export function renderBulkAttachmentPicker(groups, labels = {}, syncedMap = {}) 
     title.append(groupCheckbox, titleText);
     block.appendChild(title);
 
-    // Keep the raw group data on the block so the title can be refreshed in
-    // place when an import later marks some of its files as synced.
     block.dataset.title = labels[ticketId] || String(group.id);
     block.dataset.count = String(files.length);
     block.dataset.size = totalSize;
@@ -649,10 +532,6 @@ export function renderBulkAttachmentPicker(groups, labels = {}, syncedMap = {}) 
   updateBulkIncludeSyncState();
 }
 
-// Keeps the picker's global select-all in step with the per-ticket checkboxes,
-// looking only at files that still need syncing (disabled ones are ignored).
-// The toggle is hidden entirely when the selected tickets have no attachments,
-// and shown checked when every attachment is already uploaded to Jira.
 function updateBulkAttachmentSelectAll() {
   if (!bulkAttachmentSelectAll) return;
   const allBoxes = bulkAttachmentGroups.querySelectorAll(
@@ -662,16 +541,14 @@ function updateBulkAttachmentSelectAll() {
   const boxes = bulkAttachmentGroups.querySelectorAll(
     ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
   );
-  // Nothing left to select — either there are no attachments at all, or every
-  // one is already uploaded (disabled). Drop the Select-all toggle entirely.
+
   const toggle = bulkAttachmentSelectAll.closest(".attachment-picker-toggle");
   toggle?.classList.toggle("hidden", boxes.length === 0);
   let checked = 0;
   for (const box of boxes) if (box.checked) checked++;
 
   if (boxes.length === 0) {
-    // Every attachment is already on Jira (or none exist) — keep the toggle
-    // disabled+checked underneath so a later re-render starts consistent.
+
     bulkAttachmentSelectAll.checked = allBoxes.length > 0;
     bulkAttachmentSelectAll.disabled = allBoxes.length > 0;
     bulkAttachmentSelectAll.indeterminate = false;
@@ -682,16 +559,8 @@ function updateBulkAttachmentSelectAll() {
   bulkAttachmentSelectAll.indeterminate = checked > 0 && checked < boxes.length;
 }
 
-// Set while the picker shows the "No attachments found." message — treated as
-// "nothing to upload", so the include toggle gets marked checked + disabled.
 let bulkPickerHasNoAttachments = false;
 
-// Reflects "everything already on Jira" back onto the Include-attachments
-// toggle: when every listed attachment is already synced — found via the Jira
-// handshake, or after an import uploaded them — the toggle is marked checked +
-// disabled. Like the single-ticket picker, the panel is left in its current
-// collapsed/expanded state — never re-opened after a run completes. Otherwise
-// the toggle is left enabled for the user.
 function updateBulkIncludeSyncState() {
   if (!bulkIncludeAttachments) return;
   const allBoxes = bulkAttachmentGroups.querySelectorAll(
@@ -709,15 +578,10 @@ function updateBulkIncludeSyncState() {
   } else {
     bulkIncludeAttachments.disabled = false;
   }
-  // When the include toggle flips to the all-synced/disabled state, the
-  // listing sync CTA should disappear (nothing left to attach or re-run).
+
   updateListingControls();
 }
 
-// Marks a ticket's select-all checkbox to match its child attachments: checked
-// when every remaining file is checked, unchecked when none are, indeterminate
-// in between — and disabled + checked when all of its attachments are already
-// uploaded to Jira (nothing left to select).
 function updateGroupCheck(ticketId) {
   const groupCheck = bulkAttachmentGroups.querySelector(
     `.attachment-group-check[data-ticket="${ticketId}"]`,
@@ -744,18 +608,12 @@ function updateGroupCheck(ticketId) {
   groupCheck.indeterminate = checked > 0 && checked < boxes.length;
 }
 
-// Re-syncs every ticket's select-all checkbox (used after the global select-all
-// toggle flips all children at once).
 export function updateBulkGroupChecks() {
   bulkAttachmentGroups
     .querySelectorAll(".attachment-group-check")
     .forEach((groupCheck) => updateGroupCheck(groupCheck.dataset.ticket));
 }
 
-// After a bulk run finishes, marks the attachment names that were actually
-// uploaded to Jira as synced (checked + disabled) in the open picker, so a
-// re-run reflects what the import just did without re-opening the handshake.
-// uploadedMap: { [ticketId]: [filename, ...] }.
 export function markBulkAttachmentsSynced(uploadedMap) {
   if (!bulkAttachmentGroups || !uploadedMap) return;
   for (const [ticketId, names] of Object.entries(uploadedMap)) {
@@ -787,9 +645,6 @@ export function markBulkAttachmentsSynced(uploadedMap) {
   updateBulkIncludeSyncState();
 }
 
-// Rebuilds a group's title ("label (N) · size") from the block's stored
-// metadata — the synced count isn't shown, so the refresh just needs to keep
-// the label/count/size consistent after an import marks files as synced.
 function refreshBulkGroupTitle(ticketId) {
   const block = bulkAttachmentGroups.querySelector(
     `.attachment-group-check[data-ticket="${ticketId}"]`,
@@ -801,9 +656,6 @@ function refreshBulkGroupTitle(ticketId) {
   titleText.textContent = `${block.dataset.title || ticketId} (${count})${size ? ` · ${size}` : ""}`;
 }
 
-// After the import handshake, disables preview rows for tickets that already
-// exist on Jira with every included attachment already uploaded — they'd be a
-// no-op anyway. Purely cosmetic; the worker skips missing files by name.
 export function markBulkRowsFullySynced(fullySyncedIds) {
   if (!fullySyncedIds) return;
   const ids = new Set(
@@ -838,10 +690,6 @@ export function setSourceSite(site) {
   );
 }
 
-// When the active tab fully matches a site, the source can't be switched
-// manually. The selected site's button stays enabled (clicking it just
-// re-selects the same site); only the other site's button and the switch
-// are disabled.
 export function setSourceSiteLocked(locked) {
   sourceSiteInput.disabled = locked;
   const current = getSourceSite();
@@ -851,9 +699,6 @@ export function setSourceSiteLocked(locked) {
   document.querySelector(".site-toggle")?.classList.toggle("locked", locked);
 }
 
-// Hide the source-site section entirely when no site is detected on the tab;
-// the gap left behind is where the decorative canvas lives, so it flips the
-// other way.
 export function setSourceSiteVisible(visible) {
   sourceSiteSwitch
     .closest(".field-block")
@@ -876,10 +721,6 @@ export const previewCollapseBtn = el("previewCollapseBtn");
 export const tableWrap = document.querySelector(".table-wrap");
 export const selectAllCheckbox = el("selectAllCheckbox");
 
-// Manual collapse/expand toggle on the preview toolbar — works independently
-// of the include-attachments auto-collapse so the table can be tucked away
-// (or brought back) at any time. Wired here, after the refs, so the button
-// exists before the listener attaches.
 previewCollapseBtn?.addEventListener("click", () => {
   setBulkPreviewCollapsed(
     !previewSection.classList.contains("preview-collapsed"),
@@ -905,9 +746,6 @@ export const bulkMediaToggle = el("bulkMediaToggle");
 export const bulkMediaProgressList = el("bulkMediaProgressList");
 export const bulkMediaProgressCount = el("bulkMediaProgressCount");
 
-// Collapse/expand for the per-ticket media panel. Collapsed keeps only the
-// active ticket's row visible (see refreshBulkMediaRowVisibility), trimming
-// the panel to a single element; the user's choice survives across runs.
 bulkMediaToggle?.addEventListener("click", () => {
   setBulkMediaCollapsed(bulkMediaProgress?.dataset.collapsed !== "true");
 });
@@ -918,15 +756,12 @@ export const syncProgressPercent = el("syncProgressPercent");
 export const syncProgressBar = el("syncProgressBar");
 export const syncAbortBtn = el("syncAbortBtn");
 
-// Shared mutable state across modules.
 export const state = {
   bulkRows: [],
   importData: null,
   importExt: null,
   attachmentSelection: null,
-  // Bulk picker selection: { [ticketId]: [selected file names] }. Empty when
-  // the picker is closed; per-ticket arrays are empty when the user unchecked
-  // everything for that ticket.
+
   bulkAttachmentSelection: null,
 };
 
@@ -938,21 +773,14 @@ const HTML_ESCAPES = {
   "'": "&#39;",
 };
 
-// Escapes text before it's interpolated into innerHTML. Project keys are
-// user input (and project history is persisted across sessions), and the
-// ticket key/url come back from the Jira API response — none of that
-// should be trusted enough to inject as raw markup.
 export function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
 }
 
-// state: "info" | "loading" | "success" | "error"
 export function setStatus(message, status = "info") {
   statusText.textContent = message;
   statusDiv.dataset.state = status;
-  // In-flight status updates drive the shared status bar at the bottom of
-  // the popup. Glide to the bottom so the user actually sees the progress
-  // (and any follow-up rows/cards) instead of it happening below the fold.
+
   if (status === "loading") {
     smoothScrollToBottom();
   }
@@ -967,14 +795,10 @@ export function setBusy(isBusy) {
   includeAttachmentsInput.disabled = isBusy;
   if (isBusy) collapseAttachmentPickers();
   updateAttachmentSelectAll();
-  // After a run the busy guard is gone, so a sync that uploaded every
-  // attachment can mark the include toggle checked + disabled again.
+
   if (!isBusy) updateAttachmentIncludeSyncState();
 }
 
-// Collapses any visible attachment picker so creation/progress is front and
-// center; the user can re-expand via the header. The stored selection is
-// unaffected — collapsing only hides the file list.
 export function collapseAttachmentPickers() {
   for (const picker of [attachmentPicker, bulkAttachmentPicker]) {
     if (!picker || picker.hidden) continue;
@@ -985,33 +809,20 @@ export function collapseAttachmentPickers() {
   }
 }
 
-// When every row in the uploaded file has been created or already existed,
-// the import CTA is hidden entirely — all work is done. If anything is
-// still selectable (failed or unprocessed rows), it stays visible so the
-// user can retry just those.
 export function lockBulkImport() {
   importBtn.classList.add("hidden");
 }
 
 export function unlockBulkImport() {
-  // In the listing flow the "Create selected tickets" CTA stays hidden —
-  // re-running goes through the "Sync selected … listing" CTA instead.
+
   if (bulkRowsFromListing) return;
   importBtn.classList.remove("hidden");
   importBtn.disabled = false;
   importBtn.dataset.loading = "false";
 }
 
-// Tracks whether a bulk run is in flight. addBulkRow/loadBulkRows consult it
-// so rows added mid-sync don't re-show the Select-all toggle the busy state
-// just hid.
 let bulkBusy = false;
 
-// True while the current bulk preview rows came from a site listing
-// (runListingImport) rather than an Excel report. In that flow the "Create
-// selected tickets" CTA is never shown — re-running is always done through
-// the "Sync selected … listing" CTA, which re-reads the ticked rows from the
-// page. Cleared when a report is loaded or the upload is cleared.
 let bulkRowsFromListing = false;
 
 export function setBulkRowsFromListing(fromListing) {
@@ -1029,24 +840,16 @@ export function setBulkBusy(isBusy) {
   fileInput.disabled = isBusy;
   listingImportBtn.disabled = isBusy;
   if (isBusy) collapseAttachmentPickers();
-  // While a bulk run is in progress the preview header keeps only the
-  // "Processed N, Selected X of Y" count (right-aligned) — the "Preview
-  // selected tickets" caption and the Select-all toggle would only crowd the
-  // "Processing N of M" status label. Both come back once the run settles,
-  // with Select-all only if anything is still selectable.
+
   previewCollapseBtn?.classList.toggle("hidden", isBusy);
   selectAllLabel?.classList.toggle("hidden", isBusy);
   if (!isBusy) {
     updateBulkSelectAllVisibility();
-    // After a run the busy guard is gone, so an import that finished syncing
-    // every attachment can now expand the picker and mark the include toggle.
+
     updateBulkIncludeSyncState();
   }
 }
 
-// Remembers each view's scroll offset so switching tabs restores the user's
-// place instead of snapping to the top. Both views scroll inside the popup
-// body (html has overflow hidden; body is the actual scroll container).
 const viewScroll = { single: 0, bulk: 0 };
 
 export function switchView(view, focusTab = true) {
@@ -1054,8 +857,6 @@ export function switchView(view, focusTab = true) {
   const entering = isBulk ? "bulk" : "single";
   const leaving = isBulk ? "single" : "bulk";
 
-  // Capture the outgoing view's scroll before hiding it, while it still has
-  // height — a hidden view has none, so reading it there always returns 0.
   viewScroll[leaving] = document.body.scrollTop || 0;
 
   singleView.hidden = isBulk;
@@ -1079,22 +880,13 @@ export function switchView(view, focusTab = true) {
     );
   }
 
-  // Only user-initiated switches (the tab buttons) move focus onto the tab.
-  // Automated switches (e.g. disabling the single tab on an unsupported page)
-  // must leave focus where it is so the initial focus on the Base URL field
-  // isn't stolen.
   if (focusTab) {
     (isBulk ? tabBulk : tabSingle)?.focus?.({ preventScroll: true });
   }
 
-  // Put the entering view back where the user left it. Setting scrollTop is
-  // synchronous, so this applies as soon as the new height is laid out.
   document.body.scrollTop = viewScroll[entering] || 0;
 }
 
-// The "Current Ticket" flow only works while the active tab is a detected
-// Spark/Octane ticket. When the site can't be matched (e.g. an unsupported
-// page), the tab is disabled so the user lands on Bulk Import instead.
 export function setSingleTabEnabled(enabled) {
   const isEnabled = Boolean(enabled);
   tabSingle.disabled = !isEnabled;
@@ -1120,12 +912,6 @@ export function updateBulkStatusMessage() {
   );
 }
 
-// The site detected on the active tab's listing page (null when the tab isn't
-// a supported listing) and whether that listing has at least one ticked row.
-// Together they gate the listing-only controls: the "Sync selected … listing"
-// CTA and the bulk "Include attachments" section appear only when a site
-// import can actually run (listing detected AND something selected) — with
-// nothing ticked the Excel flow is the only import path.
 let activeListingSite = null;
 let listingHasSelection = false;
 
@@ -1146,11 +932,6 @@ export function getListingHasSelection() {
   return listingHasSelection;
 }
 
-// True while an Excel report is loaded in the bulk view. The Excel flow has
-// no attachment source and no listing page, so while it's active the
-// listing-only controls — the "Sync selected … listing" CTA and the bulk
-// "Include attachments" section — stay hidden. Clearing the upload restores
-// them to whatever the active tab's listing state says.
 let excelFlowActive = false;
 
 export function isExcelFlowActive() {
@@ -1162,11 +943,6 @@ export function setExcelFlowActive(active) {
   updateListingControls();
 }
 
-// True when a finished listing run has nothing left to do: every preview row
-// was created/synced (checked + disabled), every attachment is already on
-// Jira (the include toggle is checked + disabled), and the run's report is
-// available to download. In that resting state the "Sync selected … listing"
-// CTA is dropped — it would only re-run a no-op.
 function listingSyncDoneState() {
   if (!bulkRowsFromListing || !state.bulkRows.length) return false;
   const allRowsDone = state.bulkRows.every(
@@ -1179,9 +955,6 @@ function listingSyncDoneState() {
   );
 }
 
-// The listing-only controls show only when the active tab is a supported
-// listing with at least one ticked row AND no report is loaded. The sync CTA
-// additionally disappears when the whole listing is already synced.
 function updateListingControls() {
   const show =
     !excelFlowActive && Boolean(activeListingSite) && listingHasSelection;
@@ -1193,9 +966,6 @@ function updateListingControls() {
   }
 }
 
-// Single entry point that folds the active tab's listing state (site +
-// selection) into every listing-dependent control: the dropzone's clear
-// affordance and the bulk "Include attachments" section + sync CTA.
 export function applyListingState(listing, selectedCount) {
   setActiveListingSite(listing);
   setListingHasSelection(selectedCount > 0);
@@ -1211,15 +981,10 @@ export function setDropzoneLoaded() {
   dropzone.dataset.loaded = "true";
   dropzoneTitle.textContent = "Upload Done";
   dropzoneIcon.innerHTML = DROPZONE_ICON_CHECK;
-  // An uploaded report means the Excel flow is the source of truth — the
-  // listing CTA and include-attachments picker don't apply while it's loaded.
+
   setExcelFlowActive(true);
   setBulkRowsFromListing(false);
-  // The clear affordance only helps while a site import could actually run —
-  // an Octane or Spark listing with rows selected. Reflect the tab's last-known
-  // listing state right away so the chip never flashes on when it isn't
-  // applicable; the post-parse detection (excel.js) refines this once it
-  // resolves.
+
   updateClearAffordance(activeListingSite, listingHasSelection ? 1 : 0);
 }
 
@@ -1230,14 +995,10 @@ export function resetDropzone() {
   dropzoneHint.innerHTML =
     "Octane: ID/Name/Description<br/>Spark: Number/Short description/Description";
   clearFileBtn.hidden = true;
-  // With the upload cleared, the listing-based controls come back (if the
-  // active tab is a supported listing).
+
   setExcelFlowActive(false);
 }
 
-// Clears a loaded report and restores the bulk view to its idle state:
-// dropzone reset, preview/progress/export cleared, and the listing controls
-// (sync CTA + include attachments) re-enabled.
 export function clearFileUpload() {
   if (fileInput) fileInput.value = "";
   state.bulkRows = [];
@@ -1258,17 +1019,8 @@ export function clearFileUpload() {
   updateSelectionCount();
 }
 
-// The clear chip on the dropzone. Wired here (after the refs) so the button
-// exists before the listener attaches; a click on it clears the upload
-// instead of opening the file picker.
 clearFileBtn?.addEventListener("click", clearFileUpload);
 
-// The dropzone's clear affordance (the clear button and its "Click clear to
-// switch to … importing" hint) is only useful while a site import could
-// actually run — that's an Octane or Spark listing with at least one row
-// selected. Anywhere else (no supported listing, or a listing with nothing
-// ticked) the loaded report is the only viable source, so both stay hidden.
-// Outside the Excel flow there's nothing to clear, so the chip stays hidden too.
 export function updateClearAffordance(listing, selectedCount) {
   if (!isExcelFlowActive()) {
     setClearHintVisible(false);
@@ -1286,13 +1038,8 @@ function setClearHintVisible(visible) {
   if (br && br.nodeName === "BR") br.style.display = visible ? "" : "none";
 }
 
-// The count label and status prompt are recomputed on every row-state change,
-// and a busy worker pool can land several in a single tick. Coalescing them
-// into one rAF pass stops large imports from re-scanning the whole row list
-// (and re-rendering the status text) once per row.
 let selectionCountScheduled = false;
 
-// The preview toolbar's title shows how many tickets are currently listed.
 function updatePreviewTitle() {
   if (!previewTitle) return;
   previewTitle.textContent = `Preview selected tickets (${state.bulkRows.length})`;
@@ -1329,8 +1076,6 @@ export function updateSelectionCount() {
       selectionCount.textContent = `${processedLabel}Selected ${selected} of ${state.bulkRows.length}`;
     }
 
-    // While an import is running the progress messages win; only refresh the
-    // resting-state prompt when the user is free to tweak the selection.
     if (!state.bulkRows.length || importBtn.disabled) return;
 
     if (selectable === 0) {
@@ -1342,9 +1087,7 @@ export function updateSelectionCount() {
         "success",
       );
     } else if (selected > 0) {
-      // Something is ticked again — the create CTA comes back and is ready
-      // (Excel flow); in the listing flow the "Sync selected … listing" CTA
-      // is the re-run path.
+
       unlockBulkImport();
       setStatus(
         bulkRowsFromListing
@@ -1353,9 +1096,7 @@ export function updateSelectionCount() {
         "info",
       );
     } else {
-      // Rows remain but none are ticked. After a run the imported rows are
-      // done and the rest needs a fresh pick — keep the CTA hidden until the
-      // user selects new items (the Excel flow can batch-create in rounds).
+
       importBtn.classList.add("hidden");
       setStatus(
         processed > 0
@@ -1366,8 +1107,7 @@ export function updateSelectionCount() {
         "info",
       );
     }
-    // The listing sync CTA reflects the resting state (hidden once a finished
-    // run has nothing left to sync).
+
     updateListingControls();
   });
 }
@@ -1382,17 +1122,12 @@ export function toggleSelectAll() {
 const isBulkRowDone = (r) =>
   r.statusEl.dataset.state === "created" || r.statusEl.dataset.state === "exists";
 
-// Shows the Select-all toggle only when at least one row can still be chosen
-// (anything not created/exists). Called after a run settles so an all-done
-// table hides the toggle, mirroring reorderBulkRowsAfterImport.
 export function updateBulkSelectAllVisibility() {
   if (!selectAllLabel) return;
   const hasSelectable = state.bulkRows.some((r) => !isBulkRowDone(r));
   selectAllLabel.classList.toggle("hidden", !hasSelectable);
 }
 
-// After an import, hoist rows that were created or already existed to the
-// top of the preview and lock their checkboxes so they can't be re-imported.
 export function reorderBulkRowsAfterImport() {
   const done = [];
   const rest = [];
@@ -1410,8 +1145,6 @@ export function reorderBulkRowsAfterImport() {
   });
   previewBody.appendChild(fragment);
 
-  // With every row finished, the select-all toggle has nothing left to do
-  // (and while the run is still busy it stays hidden regardless).
   const allDone = state.bulkRows.every(isBulkRowDone);
   selectAllLabel?.classList.toggle("hidden", bulkBusy || allDone);
 
@@ -1434,13 +1167,6 @@ export function updateProgress(completed, total, label) {
   progressLabel.textContent = label || `Importing ${completed} of ${total}…`;
 }
 
-// --- Bulk per-ticket media upload progress ---------------------------------
-// One row per ticket that has attachments to upload; tickets are processed one
-// at a time, so the current row animates in real time while the rest wait.
-
-// Collapsed mode keeps exactly one row visible — the ticket currently
-// uploading (or the next one up, then the last one finished) — so the panel
-// stays one element tall while a run is in progress. Expanded shows every row.
 export function setBulkMediaCollapsed(collapsed) {
   if (!bulkMediaProgress) return;
   bulkMediaProgress.dataset.collapsed = collapsed ? "true" : "false";
@@ -1463,8 +1189,6 @@ function refreshBulkMediaRowVisibility() {
   rows.forEach((r) => (r.style.display = r === active ? "" : "none"));
 }
 
-// Renders a row per label (the ticket's short id) and shows the section.
-// An empty list hides the section — used when a run has no media to upload.
 export function setupBulkMediaProgress(labels) {
   if (!bulkMediaProgressList) return;
   bulkMediaProgressList.innerHTML = "";
@@ -1492,9 +1216,6 @@ export function setupBulkMediaProgress(labels) {
     bar.className = "bulk-media-row-bar";
     track.appendChild(bar);
 
-    // Per-ticket file count under the bar ("3 of 5 files uploaded…"),
-    // filled in by updateBulkMediaFiles as files complete. Starts at "0 files"
-    // so the hint line is present (and the row height fixed) from the start.
     const files = document.createElement("div");
     files.className = "bulk-media-row-files";
     files.textContent = "0 files";
@@ -1511,9 +1232,6 @@ export function setupBulkMediaProgress(labels) {
   refreshBulkMediaRowVisibility();
 }
 
-// Marks a row as the one currently uploading (resetting its bar to 0) and
-// brings it into view — in expanded mode the list may be scrolled past it, so
-// the active ticket stays on screen as it uploads.
 export function startBulkMediaProgress(rowIndex) {
   const row = bulkMediaProgressList?.children[rowIndex];
   if (!row) return;
@@ -1526,8 +1244,6 @@ export function startBulkMediaProgress(rowIndex) {
   refreshBulkMediaRowVisibility();
 }
 
-// Real-time byte progress for a ticket's upload. `loaded`/`total` are bytes;
-// an optional `label` overrides the default "formatted / formatted" bytes text.
 export function updateBulkMediaProgress(rowIndex, loaded, total, label) {
   const row = bulkMediaProgressList?.children[rowIndex];
   if (!row) return;
@@ -1546,8 +1262,6 @@ export function updateBulkMediaProgress(rowIndex, loaded, total, label) {
   if (total > 0 && loaded >= total) setBulkMediaProgressDone(rowIndex);
 }
 
-// Marks a ticket's media upload as finished (100%, green) and finalizes the
-// file-count hint: "N files uploaded" (or "N of M" when some failed).
 export function setBulkMediaProgressDone(rowIndex) {
   const row = bulkMediaProgressList?.children[rowIndex];
   if (!row) return;
@@ -1568,9 +1282,6 @@ export function setBulkMediaProgressDone(rowIndex) {
   refreshBulkMediaRowVisibility();
 }
 
-// Per-ticket file progress for the hint under the bar. `uploaded`/`total` are
-// file counts on this ticket; while still uploading it reads "X of N
-// files…", and once the row is done setBulkMediaProgressDone rewrites it.
 export function updateBulkMediaFiles(rowIndex, uploaded, total) {
   const row = bulkMediaProgressList?.children[rowIndex];
   if (!row) return;
@@ -1593,9 +1304,6 @@ export function hideBulkMediaProgress() {
   if (bulkMediaProgressList) bulkMediaProgressList.innerHTML = "";
 }
 
-// Byte-level upload progress for the single-ticket flow (bulk flows track row
-// counts via updateProgress instead). `loaded`/`total` are bytes; the caller
-// formats the size label (ui.js imports nothing, so bytes stay raw here).
 export function updateSyncProgress(loaded, total, label) {
   const pct =
     total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
@@ -1637,8 +1345,6 @@ export function renderTicketCard(issueKey, issueUrl) {
     });
   });
 
-  // The card is now on screen — if this ticket is fully synced the CTA has
-  // nothing left to do, so let the include-sync state re-evaluate and hide it.
   ticketCardShown = true;
   updateAttachmentIncludeSyncState();
 }
@@ -1663,9 +1369,6 @@ export function redirectToLogin(jiraBaseUrl, projectKey) {
   );
 }
 
-// Builds a table cell whose text is clamped to 3 lines with a per-row
-// "more"/"less" toggle for the overflow. The toggle stays hidden until the
-// text actually overflows (measured once layout settles).
 function createClampedCell(text, className) {
   const wrapper = document.createElement("div");
   wrapper.className = "clamp-cell";
@@ -1689,10 +1392,6 @@ function createClampedCell(text, className) {
   return wrapper;
 }
 
-// Hides the "more" toggle on any cell whose text already fits within the
-// 3-line clamp. addBulkRow requests this after every row, so a single
-// pending flag coalesces a whole batch (Excel load, listing import) into
-// one measurement pass instead of one rAF + full re-scan per row.
 let clampUpdateScheduled = false;
 function scheduleClampUpdate() {
   if (clampUpdateScheduled) return;
@@ -1709,24 +1408,15 @@ function scheduleClampUpdate() {
   });
 }
 
-// Shift-click support for the preview table's row checkboxes. The last
-// checkbox the user clicked becomes the anchor; a shift+click on another row
-// then flips every checkbox between the two to the clicked row's state.
 let shiftSelectAnchor = null;
-// The change event doesn't carry modifier keys, so the click handler (a real
-// MouseEvent) records whether shift was held for the toggle that follows.
+
 let lastShiftClick = false;
 
-// Builds a single preview row without touching the DOM tree, returning
-// { tr, row }. addBulkRow appends it immediately (streaming listing flow);
-// loadBulkRows collects the tr's into a fragment for one bulk append.
 function buildBulkRow(record, site = "Octane") {
   const siteTag = String(site || "Octane").toUpperCase();
   const titleParts = [siteTag, record.idText, record.name].filter(Boolean);
   const title = record.title || titleParts.join(" | ");
-  // Mirror the site's report schema in the id column header so the preview
-  // matches what will be exported (and round-trip on re-import): INC
-  // "Number" for Spark, numeric "ID" for Octane.
+
   previewIdHeader.textContent = site === "Spark" ? "Number" : "ID";
   const tr = document.createElement("tr");
 
@@ -1750,8 +1440,7 @@ function buildBulkRow(record, site = "Octane") {
     });
     idTd.appendChild(link);
   } else if (record.idText) {
-    // No link (e.g. a Spark export whose Number cell is plain text) — still
-    // show the incident number instead of leaving the cell empty.
+
     idTd.textContent = record.idText;
   } else {
     idTd.textContent = "—";
@@ -1786,8 +1475,6 @@ function buildBulkRow(record, site = "Octane") {
   };
   state.bulkRows.push(row);
 
-  // The click handler only records the modifier keys (change events don't
-  // carry them); the change handler applies the range and refreshes counts.
   row.checkbox.addEventListener("click", (e) => {
     lastShiftClick = e.shiftKey;
   });
@@ -1814,9 +1501,6 @@ function buildBulkRow(record, site = "Octane") {
   return { tr, row };
 }
 
-// Adds a single row to the bulk preview and returns it. Used both by
-// loadBulkRows (Excel reports render all rows at once) and by the Octane
-// page flow, which lists each scraped ticket as it is processed.
 export function addBulkRow(record, site = "Octane") {
   const { tr, row } = buildBulkRow(record, site);
   previewBody.appendChild(tr);
@@ -1835,8 +1519,6 @@ export function loadBulkRows(rows, site = "Octane") {
   state.bulkRows = [];
   shiftSelectAnchor = null;
 
-  // One bulk append (via a fragment) instead of N separate ones — large
-  // Excel reports render noticeably faster this way.
   const fragment = document.createDocumentFragment();
   for (const record of rows) {
     fragment.appendChild(buildBulkRow(record, site).tr);
@@ -1850,9 +1532,6 @@ export function loadBulkRows(rows, site = "Octane") {
   updateSelectionCount();
   scheduleClampUpdate();
 
-  // The freshly populated preview can push the import CTA and the status
-  // message below the fold; glide all the way down so the whole status bar is
-  // in view, then land focus on the action the user is ready to take.
   const revealImport = () => {
     smoothScrollToBottom();
     const focusTarget = importBtn.disabled ? selectAllCheckbox : importBtn;
@@ -1865,16 +1544,8 @@ export function loadBulkRows(rows, site = "Octane") {
   }
 }
 
-// One in-flight glide at a time: rapid progress updates (a busy worker pool,
-// per-row status lines) cancel the previous glide instead of stacking
-// competing animations.
 let scrollFrame = 0;
 
-// Glides the popup's vertical scroll to `target` (a document-body scroll
-// position) with a gentle ease-out curve, so the animation feels deliberate
-// rather than a snap. The target is re-clamped to the scrollable range on
-// every frame, so content that grows mid-glide (preview rows, ticket cards)
-// still lands at the right spot instead of stopping short.
 function smoothScrollTo(target, duration = 420) {
   const scroller = document.body;
   if (
@@ -1902,19 +1573,12 @@ function smoothScrollTo(target, duration = 420) {
   scrollFrame = requestAnimationFrame(step);
 }
 
-// Glides the popup to its very bottom (past the status bar). An unbounded
-// target keeps the glide tracking the live bottom, so a document that is
-// still growing finishes all the way at the end.
 export function smoothScrollToBottom() {
   const scroller = document.body;
   if (!scroller || typeof scroller.scrollTop !== "number") return;
   smoothScrollTo(Infinity);
 }
 
-// Glides back to the bottom of the popup so the import progress bar and the
-// shared status message are visible. The layout (buttons, status, rows) has
-// settled by the time an import's finally runs, and the glide tracks the
-// live document height, so it reaches the true end even as rows finish.
 export function frameBulkView() {
   const run = () => {
     if (bulkView.hidden) return;
@@ -1927,8 +1591,6 @@ export function frameBulkView() {
   }
 }
 
-// Glides to the bottom of the popup so the freshly rendered ticket card and
-// the shared status message are in view after a create finishes.
 export function revealStatus() {
   const run = () => smoothScrollToBottom();
   if (typeof requestAnimationFrame === "function") {

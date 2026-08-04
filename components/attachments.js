@@ -10,9 +10,6 @@ import {
   insertUploadedImages,
 } from "./adf.js";
 
-// Maps a blob's MIME sub-type to a safe file extension. BMPs are served by
-// ServiceNow under several aliases (image/x-ms-bmp etc.) that would otherwise
-// produce a bogus fallback filename like "img.x-ms-bmp".
 function extensionForBlobType(blobType) {
   const sub = (String(blobType).split("/")[1] || "")
     .split("+")[0]
@@ -24,22 +21,16 @@ function extensionForBlobType(blobType) {
   );
 }
 
-// The upload filename an image maps to on the Jira issue — shared by the
-// uploader and the "upload only what's missing" retry so both agree on names.
 export function imageUploadFilename(img) {
   return (
     img.name || `${img.placeholder}.${extensionForBlobType(dataUrlToBlob(img.dataUrl).type)}`
   );
 }
 
-// Lists the file names that failed to upload, for the error status line.
 export function failedAttachmentNames(failedNames = []) {
   return failedNames.length ? ` (${failedNames.join(", ")})` : "";
 }
 
-// Byte size of a captured `data:` URL — computed from the base64 length
-// without decoding (cheap even for large recordings, where a full atob copy
-// would be wasteful).
 function dataUrlSize(dataUrl) {
   if (!dataUrl) return 0;
   const idx = dataUrl.indexOf(",");
@@ -48,9 +39,6 @@ function dataUrlSize(dataUrl) {
   return Math.max(0, Math.floor((b64.length * 3) / 4) - padding);
 }
 
-// Cancellation for an in-flight upload batch: the Stop button aborts every
-// live XHR and sets the flag so queued files are never started. Reset at the
-// start of each uploadImages run.
 let cancelRequested = false;
 const activeXhrs = new Set();
 
@@ -59,14 +47,6 @@ export function requestUploadCancel() {
   activeXhrs.forEach((xhr) => xhr.abort());
 }
 
-// Uploads a batch of images to a Jira issue through a small bounded pool
-// (Jira has no bulk attachment endpoint — many small files are faster
-// batched than strung one after another). Never touches the description.
-// Returns the uploaded attachments by placeholder plus a failure report.
-// `onProgress(uploadedBytes, totalBytes)` is called with the aggregate bytes
-// sent so far vs. the batch total, so the UI can show "uploaded / remaining".
-// `onFile(uploadedFiles, totalFiles)` is called after each file completes (and
-// once more at the end), so the UI can show a per-file count under the bar.
 export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onFile) {
   const byPlaceholder = {};
   const MAX_CONCURRENT = 4;
@@ -97,9 +77,7 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
     while (next < images.length && !cancelRequested) {
       const img = images[next++];
       const filename = imageUploadFilename(img);
-      // Concurrent workers each add their own in-flight bytes on top of the
-      // aggregate captured when they started — a close approximation that
-      // stays monotonic and lands exactly on totalBytes at the end.
+
       const fileBase = uploadedBytes;
       try {
         const attachment = await uploadJiraAttachment(
@@ -108,7 +86,7 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
           dataUrlToBlob(img.dataUrl),
           filename,
           (loaded) => report(fileBase + loaded),
-          // Hand the live XHR to the Stop handler so a cancel aborts it.
+
           (xhr) => {
             activeXhrs.add(xhr);
             xhr.addEventListener("loadend", () => activeXhrs.delete(xhr));
@@ -118,12 +96,11 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
         uploadedFiles++;
         reportFiles();
       } catch (err) {
-        if (cancelRequested) break; // stopped by the user — not a failure
+        if (cancelRequested) break;
         failed++;
         if (!firstError) firstError = err.message || String(err);
         failedImages.push(img);
-        console.error("Image upload failed:", img.placeholder, filename, err);
-      }
+        }
       uploadedBytes += dataUrlSize(img.dataUrl);
       report();
     }
@@ -138,26 +115,14 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
   return { byPlaceholder, failed, firstError, failedImages, cancelled: cancelRequested };
 }
 
-// Uploads the scraped page's captured images and swaps their placeholders
-// in the description body for the real attachment media nodes.
-// Returns how many uploads failed (and the first error) so callers can
-// surface "image missed" instead of dropping it silently.
 export async function attachImagesToIssue(jiraOrigin, issueKey, images, description, onProgress, onFile) {
   setStatus("Uploading images...", "loading");
 
   const { byPlaceholder, failed, firstError, failedImages, cancelled } =
     await uploadImages(jiraOrigin, issueKey, images, onProgress, onFile);
 
-  // Whether stopped by the user or just partially failed, the description is
-  // still finalized with whatever uploaded — insertUploadedImages drops the
-  // placeholders that have no media node, so cancelled files simply don't
-  // appear instead of leaking `__JIRA_IMG_n__` text.
   setStatus("Attaching images to ticket...", "loading");
 
-  // The uploads succeeded — a description-embed failure is cosmetic (the
-  // images are still attached to the ticket), so it must not turn the whole
-  // import into a failure. The embed already retries transient Jira hiccups;
-  // if it still fails, surface it as a warning for the caller to show.
   let descriptionError = "";
   try {
     await updateJiraIssueDescription(
@@ -167,8 +132,7 @@ export async function attachImagesToIssue(jiraOrigin, issueKey, images, descript
     );
   } catch (err) {
     descriptionError = err.message || String(err);
-    console.error("Description embed failed:", err);
-  }
+    }
 
   const failedPlaces = new Set(failedImages.map((img) => img.placeholder));
   return {
@@ -183,15 +147,6 @@ export async function attachImagesToIssue(jiraOrigin, issueKey, images, descript
   };
 }
 
-// Retries the attachments of an already-created ticket: handshakes with Jira
-// (list the issue's current attachments), then uploads only the selected
-// files whose name isn't already attached — so a retry never duplicates what
-// already synced. Only real attachment files are considered: embedded
-// description images carry no `name` (they were already embedded into the
-// ticket's description when it was created, and their synthetic
-// `__JIRA_IMG_n__` names never match Jira's stored ones), so they're never
-// re-uploaded as bare attachments. The description is left untouched — it was
-// finalized when the ticket was first created.
 export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onProgress, onFile) {
   const existing = new Set(await listIssueAttachments(jiraOrigin, issueKey));
   const files = images.filter((img) => img.name);
