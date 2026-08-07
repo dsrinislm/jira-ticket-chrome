@@ -19,6 +19,7 @@ import {
   setSourceSiteVisible,
   setSingleTabEnabled,
   setBusy,
+  getBusy,
   setStatus,
   switchView,
   toggleSelectAll,
@@ -28,6 +29,7 @@ import {
   getActiveListingSite,
   getSourceSite,
   getIncludeAttachments,
+  getSelectedAttachments,
   setAttachmentPickerLoading,
   clearAttachmentPicker,
   renderAttachmentPicker,
@@ -63,6 +65,7 @@ import {
   bulkIncludeAttachments,
   jiraToSparkSyncBtn,
   setJiraToSparkVisible,
+  setJiraSyncFlowActive,
 } from "./components/ui.js";
 import { debounce } from "./components/util.js";
 import {
@@ -87,8 +90,12 @@ import {
 } from "./components/validation.js";
 import {
   findExistingJiraIssue,
+  findExistingJiraIssueFor,
+  getJiraIssue,
+  getJiraIssueWithAttachments,
   listIssueAttachments,
 } from "./components/api.js";
+import { extractSourceUrl } from "./components/adf.js";
 import { createTicket } from "./components/single-ticket.js";
 import {
   runBulkImport,
@@ -100,11 +107,13 @@ import {
   detectJiraIssueInTab,
   detectJiraPageInTab,
   syncJiraUpdates,
+  getSyncAttachmentItems,
 } from "./components/jira-to-spark.js";
 
 const debouncedSaveSettings = debounce(saveSettings, 300);
 
 let jiraFlowActive = false;
+let detectionLocked = false;
 
 loadInitialState();
 startGapArt();
@@ -205,12 +214,18 @@ async function runSyncUpdates() {
   }
 
   setBusy(true);
+  detectionLocked = true;
   try {
     setStatus(`Syncing updates for ${issue.key}...`, "loading");
-    const { report, sparkToJira } = await syncJiraUpdates({
-      jiraOrigin: ctx.jiraOrigin,
-      issueKey: issue.key,
-    });
+    const { report, sparkToJira, attachments, attachmentsToSpark } =
+      await syncJiraUpdates({
+        jiraOrigin: ctx.jiraOrigin,
+        issueKey: issue.key,
+        includeAttachments: getIncludeAttachments(),
+        selectedAttachments: getIncludeAttachments()
+          ? getSelectedAttachments()
+          : null,
+      });
     const via = String(report.mode || "").startsWith("spark tab")
       ? " (via Spark tab)"
       : "";
@@ -227,16 +242,55 @@ async function runSyncUpdates() {
     } else {
       bits.push("Spark comments up to date in Jira");
     }
-    const failed = report.failed > 0;
+    if (attachments?.uploaded > 0) {
+      bits.push(`${attachments.uploaded} attachment(s) synced to Jira`);
+    } else if (attachments?.failed > 0) {
+      bits.push(`${attachments.failed} attachment(s) failed to sync to Jira`);
+    } else if (attachments?.skipped > 0) {
+      bits.push("attachments up to date in Jira");
+    }
+    if (attachmentsToSpark?.uploaded > 0) {
+      bits.push(`${attachmentsToSpark.uploaded} attachment(s) synced to Spark`);
+    } else if (attachmentsToSpark?.failed > 0) {
+      const names = (attachmentsToSpark.failedNames || []).join(", ");
+      bits.push(
+        `${attachmentsToSpark.failed} attachment(s) failed to sync to Spark${names ? `: ${names}` : ""}`,
+      );
+    } else if (attachmentsToSpark?.skipped > 0) {
+      bits.push("attachments up to date in Spark");
+    }
+    const failed =
+      report.failed > 0 ||
+      attachments?.failed > 0 ||
+      attachmentsToSpark?.failed > 0;
+    if (!failed) {
+      setStatus("Ticket fully synced! try new one.", "success");
+      return;
+    }
+    const attachmentError = attachmentsToSpark?.firstError
+      ? ` ${attachmentsToSpark.firstError}`
+      : "";
     setStatus(
-      `${issue.key}: ${bits.join("; ")}${via}.${failed && report.detail ? ` ${report.detail}` : ""}`,
+      `${issue.key}: ${bits.join("; ")}${via}.${attachmentError}${failed && report.detail ? ` ${report.detail}` : ""}`,
       failed ? "error" : "success",
     );
   } catch (error) {
     setStatus(error.message || "Failed to sync updates.", "error");
   } finally {
     setBusy(false);
+    detectionLocked = false;
   }
+}
+
+function attachmentType(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  if (["mp4", "m4v", "mov", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg"].includes(ext)) {
+    return "video";
+  }
+  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff", "ico"].includes(ext)) {
+    return "image";
+  }
+  return "other";
 }
 
 includeAttachmentsInput.addEventListener("change", async () => {
@@ -247,20 +301,45 @@ includeAttachmentsInput.addEventListener("change", async () => {
 
   setAttachmentPickerLoading();
   smoothScrollToBottom();
+  detectionLocked = true;
+
+  if (jiraFlowActive) {
+    try {
+      const ctx = getJiraContext();
+      const issue = await detectJiraIssueInTab().catch(() => null);
+      if (!ctx || !issue?.key) {
+        clearAttachmentPicker();
+        return;
+      }
+      const { items, syncedNames } = await getSyncAttachmentItems({
+        jiraOrigin: ctx.jiraOrigin,
+        issueKey: issue.key,
+      });
+      if (!getIncludeAttachments()) return;
+      renderAttachmentPicker(items, syncedNames);
+      setAttachmentNote("");
+      smoothScrollToBottom();
+    } catch {
+      setSyncedTicketFound(false);
+      attachmentGroups.innerHTML =
+        '<div class="attachment-group-title">Couldn’t list attachments.</div>';
+      if (attachmentPickerTitle) {
+        attachmentPickerTitle.textContent = "Choose attachments to upload (0)";
+      }
+      smoothScrollToBottom();
+    } finally {
+      setAttachmentSyncProgress(false);
+      detectionLocked = false;
+    }
+    return;
+  }
 
   try {
     const items = await listTicketAttachmentsInTab(getSourceSite());
     if (!getIncludeAttachments()) return;
 
-    const listable = items.filter(
-      (item) => attachmentByteSize(item) <= MAX_ATTACHMENT_UPLOAD_BYTES,
-    );
-    const skipped = items.length - listable.length;
-    const note = skipped
-      ? `${skipped} file(s) over 25 MB skipped — add them from the Jira UI.`
-      : "";
-
     let syncedNames = new Set();
+    let jiraItems = [];
     let foundTicket = false;
     const ctx = getJiraContext();
     if (ctx) {
@@ -271,23 +350,81 @@ includeAttachmentsInput.addEventListener("change", async () => {
         captureEmbeddedImages: false,
       }).catch(() => null);
       if (pageData?.title) {
-        const found = await findExistingJiraIssue(
+        const found = await findExistingJiraIssueFor(
           ctx.jiraOrigin,
           ctx.projectKey,
           pageData.title,
+          pageData.url,
         );
         if (found.issue) {
           foundTicket = true;
-          syncedNames = new Set(
-            await listIssueAttachments(ctx.jiraOrigin, found.issue.key),
-          );
+          try {
+            const combined = await getJiraIssueWithAttachments(
+              ctx.jiraOrigin,
+              found.issue.key,
+            );
+            jiraItems = combined.attachments;
+          } catch {
+            jiraItems = [];
+          }
         }
       }
     }
     setSyncedTicketFound(foundTicket);
     if (!getIncludeAttachments()) return;
 
-    renderAttachmentPicker(listable, syncedNames);
+    const byName = new Map();
+    for (const item of items) {
+      byName.set(item.name, { ...item, source: "Spark" });
+    }
+    for (const j of jiraItems) {
+      const size = Number(j.size);
+      const normalized = {
+        ...j,
+        type: attachmentType(j.name),
+        sizeBytes:
+          Number.isFinite(size) && size >= 0 ? size : null,
+        url: `${ctx?.jiraOrigin}/rest/api/3/attachment/content/${encodeURIComponent(j.id)}`,
+      };
+      if (byName.has(j.name)) {
+        const spark = byName.get(j.name);
+        const sparkSize = spark.sizeBytes ?? null;
+        const sameSize =
+          sparkSize == null || normalized.sizeBytes == null
+            ? true
+            : sparkSize === normalized.sizeBytes;
+        byName.set(j.name, { ...spark, inJira: sameSize });
+      } else {
+        byName.set(j.name, { ...normalized, source: "Jira" });
+      }
+    }
+    const mergedItems = Array.from(byName.values()).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+    syncedNames = new Set(
+      mergedItems.filter((i) => i.inJira).map((i) => i.name),
+    );
+    const overLimitNames = new Set(
+      items
+        .filter((item) => attachmentByteSize(item) > MAX_ATTACHMENT_UPLOAD_BYTES)
+        .map((item) => item.name),
+    );
+    const renderItems = mergedItems.filter(
+      (item) =>
+        item.inJira ||
+        item.source !== "Spark" ||
+        !overLimitNames.has(item.name),
+    );
+    const skipped = mergedItems.filter(
+      (item) =>
+        !item.inJira &&
+        item.source === "Spark" &&
+        overLimitNames.has(item.name),
+    ).length;
+    const note = skipped
+      ? `${skipped} file(s) over 25 MB skipped — add them from the Jira UI.`
+      : "";
+    renderAttachmentPicker(renderItems, syncedNames);
     setAttachmentNote(note);
     smoothScrollToBottom();
   } catch {
@@ -300,6 +437,7 @@ includeAttachmentsInput.addEventListener("change", async () => {
     smoothScrollToBottom();
   } finally {
     setAttachmentSyncProgress(false);
+    detectionLocked = false;
   }
 });
 
@@ -497,16 +635,6 @@ sourceSiteLabels.forEach((label) =>
   }),
 );
 
-function configuredJiraOrigin() {
-  const raw = jiraBaseUrlInput.value.trim();
-  if (!raw) return null;
-  try {
-    return new URL(raw).origin;
-  } catch {
-    return null;
-  }
-}
-
 function syncJiraContextFromTab(info) {
   let changed = false;
   if (info.origin && jiraBaseUrlInput.value.trim() !== info.origin) {
@@ -525,14 +653,12 @@ function syncJiraContextFromTab(info) {
 }
 
 async function applyDetectedState() {
+  if (getBusy() || detectionLocked) return;
 
   setSyncedTicketFound(false);
   resetTicketCard();
 
   const jiraPage = await detectJiraPageInTab().catch(() => null);
-  const jiraIssue = jiraPage?.key ? jiraPage : null;
-  const onJira = Boolean(jiraIssue?.key);
-  const onConfiguredJira = onJira && configuredJiraOrigin() === jiraIssue.origin;
 
   let site = null;
   let listing = null;
@@ -555,38 +681,49 @@ async function applyDetectedState() {
   if (jiraPage) {
     syncJiraContextFromTab(jiraPage);
   }
-  const onSyncFlow = Boolean(
-    jiraPage && (jiraPage.type === "ticket" || jiraPage.type === "filter"),
-  );
+
+  let onSyncFlow = false;
+  if (jiraPage?.type === "filter") {
+    onSyncFlow = true;
+  } else if (jiraPage?.type === "ticket") {
+    try {
+      const issue = await getJiraIssue(jiraPage.origin, jiraPage.key);
+      onSyncFlow = Boolean(extractSourceUrl(issue?.fields?.description));
+    } catch {
+      onSyncFlow = false;
+    }
+  }
   const isTicketContext = matched || onSyncFlow;
   tabSingle.hidden = !isTicketContext;
   setSingleTabEnabled(isTicketContext);
 
-  if (matched) setSourceSite(site);
-  setSourceSiteVisible(matched);
-  setSourceSiteLocked(matched);
+  if (jiraPage) {
+    setSourceSiteVisible(false);
+  } else {
+    if (matched) setSourceSite(site);
+    setSourceSiteVisible(matched);
+    setSourceSiteLocked(matched);
+  }
 
   setJiraToSparkVisible(false);
   jiraFlowActive = onSyncFlow;
-  singleAttachments.hidden = Boolean(jiraPage);
-  createTicketLabel.textContent = jiraFlowActive
-    ? "Sync Updates"
-    : "Create or Sync ticket";
+  setJiraSyncFlowActive(jiraFlowActive);
+  singleAttachments.hidden = Boolean(jiraPage) && !jiraFlowActive;
+  if (jiraFlowActive) {
+    includeAttachmentsInput.disabled = false;
+  }
+  createTicketLabel.textContent = "Sync Updates";
   createTicketBtn.hidden = Boolean(jiraPage) && !jiraFlowActive;
   if (jiraFlowActive && !bulkView.hidden) {
     switchView("single", false);
   }
 
   applyListingState(listing, selectedCount);
-  if (!bulkView.hidden) {
+  if (jiraFlowActive && jiraPage?.type === "ticket") {
+    setStatus("Sync updates with Spark", "info");
+    createTicketBtn.focus();
+  } else if (!bulkView.hidden) {
     updateBulkStatusMessage();
-  } else if (onJira) {
-    setStatus(
-      onConfiguredJira
-        ? `Jira issue ${jiraIssue.key} detected — sync its comments back to Spark.`
-        : `Jira issue ${jiraIssue.key} detected — set the Jira base URL to this Jira to sync its comments back to Spark.`,
-      "info",
-    );
   } else if (jiraPage) {
     setStatus(
       jiraPage.type === "filter"

@@ -40,7 +40,7 @@ import {
   fetchSparkCommentsInTab,
 } from "./scrape.js";
 import { syncSparkComments } from "./comments.js";
-import { findExistingJiraIssue, createJiraIssue } from "./api.js";
+import { findExistingJiraIssueFor, createJiraIssue } from "./api.js";
 import { buildIssueDescription, sourceUrlBlock } from "./adf.js";
 import {
   attachImagesToIssue,
@@ -71,9 +71,12 @@ function bulkCountsSummary({ created, skipped, failed }) {
 async function runBulkWorkerPool(total, runItem) {
   const counters = { created: 0, skipped: 0, failed: 0 };
   const progress = { completed: 0 };
+  let nextIndex = 0;
 
   const worker = async () => {
-    for (let index = 0; index < total && !abortRequested; index++) {
+    while (!abortRequested) {
+      const index = nextIndex++;
+      if (index >= total) return;
       await runItem(index, counters, progress);
       progress.completed++;
       updateProgress(progress.completed, total);
@@ -178,10 +181,11 @@ export async function runBulkImport() {
         setRowStatus(row, "checking", "Checking…");
 
         try {
-          const existing = await findExistingJiraIssue(
+          const existing = await findExistingJiraIssueFor(
             jiraOrigin,
             projectKey,
             row.title,
+            row.sourceUrl,
           );
 
           if (existing.error) {
@@ -395,10 +399,11 @@ export async function runListingImport(site) {
 
         setRowStatus(row, "checking", "Checking…");
 
-        const existing = await findExistingJiraIssue(
+        const existing = await findExistingJiraIssueFor(
           jiraOrigin,
           projectKey,
           row.title,
+          detail.url || row.sourceUrl,
         );
         if (existing.error) {
           setRowStatus(row, "error", "Duplicate check failed");
@@ -450,6 +455,7 @@ export async function runListingImport(site) {
               jiraOrigin,
               existing.issue.key,
               comments,
+              String(items[index].id),
             );
             if (commentSync.added > 0) {
               statusHtml = `${statusHtml} — ${commentSync.added} comment(s) synced`;
@@ -520,6 +526,7 @@ export async function runListingImport(site) {
                 jiraOrigin,
                 issue.key,
                 comments,
+                String(items[index].id),
               );
             }
 

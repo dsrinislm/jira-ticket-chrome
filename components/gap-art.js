@@ -25,8 +25,8 @@ function spawn(scene) {
     x: Math.random() * scene.width,
     y: Math.random() * scene.height,
     r: 0.6 + Math.random() * 1.8,
-    vx: (Math.random() - 0.5) * 0.16,
-    vy: -(0.05 + Math.random() * 0.2),
+    vx: (Math.random() - 0.5) * 0.6,
+    vy: -(0.2 + Math.random() * 0.5),
     alpha: 0.12 + Math.random() * 0.35,
     color: PALETTE[Math.floor(Math.random() * PALETTE.length)],
   }));

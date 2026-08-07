@@ -1029,20 +1029,11 @@ function detectTabStateInPage(sites) {
   return { site, listing, selectedCount };
 }
 
-const TAB_STATE_CACHE_TTL_MS = 500;
-const tabStateCache = new Map();
-
 export async function detectTabState() {
   const currentTab = await getCurrentTab();
   const url = (currentTab?.url || "").trim();
   if (url && !/^https?:\/\//i.test(url)) {
     return { site: null, listing: null };
-  }
-
-  const cacheKey = `${currentTab.id}|${url}`;
-  const cached = tabStateCache.get(cacheKey);
-  if (cached && Date.now() - cached.time < TAB_STATE_CACHE_TTL_MS) {
-    return cached.value;
   }
 
   try {
@@ -1055,22 +1046,11 @@ export async function detectTabState() {
     const site = results.map((r) => r.result?.site).find(Boolean) || null;
     const found =
       results.map((r) => r.result).find((r) => r && r.listing) || null;
-    const value = {
+    return {
       site,
       listing: found ? found.listing : null,
       selectedCount: found ? found.selectedCount || 0 : 0,
     };
-
-    tabStateCache.set(cacheKey, { time: Date.now(), value });
-    if (tabStateCache.size > 20) {
-      for (const [key, entry] of tabStateCache) {
-        if (Date.now() - entry.time > TAB_STATE_CACHE_TTL_MS) {
-          tabStateCache.delete(key);
-        }
-      }
-    }
-
-    return value;
   } catch {
     return { site: null, listing: null };
   }
@@ -1593,7 +1573,7 @@ async function fetchSparkCommentsInPage(ids) {
     const entries = [];
     try {
       const response = await fetch(
-        `${location.origin}/api/now/table/sys_journal_field?sysparm_query=element_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=element,value,sys_created_by,sys_created_on&sysparm_display_value=true&sysparm_limit=1000`,
+        `${location.origin}/api/now/table/sys_journal_field?sysparm_query=element_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=element,value,sys_created_by,sys_created_on,sys_id&sysparm_display_value=true&sysparm_limit=1000`,
         { credentials: "include", headers },
       );
       if (response.ok) {
@@ -1608,6 +1588,7 @@ async function fetchSparkCommentsInPage(ids) {
           const text = String(row?.value || "").trim();
           if (!text && !author) continue;
           entries.push({
+            sysId: String(row?.sys_id || "").trim(),
             kind: isPublic ? "comments" : "work_notes",
             author,
             createdAt: String(row?.sys_created_on || "").trim(),
@@ -1637,6 +1618,7 @@ async function fetchSparkCommentsInPage(ids) {
               const text = String(gr.getValue("value") || "").trim();
               if (!text && !author) continue;
               entries.push({
+                sysId: String(gr.getUniqueValue() || "").trim(),
                 kind: isPublic ? "comments" : "work_notes",
                 author,
                 createdAt: String(
@@ -1706,6 +1688,7 @@ async function fetchSparkCommentsInPage(ids) {
           )
             continue;
           entries.push({
+            sysId: li.getAttribute("data-journal-id") || "",
             kind: /work\s*notes?/i.test(typeLabel) ? "work_notes" : "comments",
             author,
             createdAt: dateStr,
@@ -1743,6 +1726,7 @@ async function fetchSparkCommentsInPage(ids) {
             )
               continue;
             entries.push({
+              sysId: li.getAttribute("data-journal-id") || "",
               kind: /work\s*notes?/i.test(typeLabel)
                 ? "work_notes"
                 : "comments",
@@ -1787,6 +1771,264 @@ async function fetchSparkCommentsInPage(ids) {
   return groups;
 }
 
+function fetchSparkAttachmentsInPage(sysId) {
+  const id = String(sysId || "").trim();
+
+  const userToken =
+    (typeof window !== "undefined" && window.g_ck) ||
+    document.querySelector('meta[name="X-UserToken"]')?.content ||
+    document.querySelector('input[name="X-UserToken"]')?.value ||
+    "";
+  const headers = { Accept: "application/json" };
+  if (userToken) headers["X-UserToken"] = userToken;
+
+  const toDataUrl = async (url) => {
+    try {
+      const response = await fetch(url, { credentials: "include", headers });
+      if (!response.ok) return null;
+      const blob = await response.blob();
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch {
+      return null;
+    }
+  };
+
+  return (async () => {
+    const attachments = [];
+    if (!id) return [{ id, attachments }];
+    try {
+      const response = await fetch(
+        `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=sys_id,file_name,content_type&sysparm_display_value=false&sysparm_limit=1000`,
+        { credentials: "include", headers },
+      );
+      if (response.ok) {
+        const json = await response.json();
+        const rows = Array.isArray(json?.result) ? json.result : [];
+        for (const att of rows) {
+          const fileSysId = String(att?.sys_id || "").trim();
+          const name = String(att?.file_name || "").trim();
+          if (!fileSysId || !name) continue;
+          const dataUrl = await toDataUrl(
+            `${location.origin}/api/now/attachment/${encodeURIComponent(fileSysId)}/file`,
+          );
+          if (dataUrl) attachments.push({ name, dataUrl });
+        }
+      }
+    } catch {}
+    return [{ id, attachments }];
+  })();
+}
+
+function listSparkAttachmentNamesInPage(sysId) {
+  const id = String(sysId || "").trim();
+
+  const userToken =
+    (typeof window !== "undefined" && window.g_ck) ||
+    document.querySelector('meta[name="X-UserToken"]')?.content ||
+    document.querySelector('input[name="X-UserToken"]')?.value ||
+    "";
+  const headers = { Accept: "application/json" };
+  if (userToken) headers["X-UserToken"] = userToken;
+
+  return (async () => {
+    const names = [];
+    if (!id) return [{ id, names }];
+    try {
+      const response = await fetch(
+        `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=file_name&sysparm_display_value=false&sysparm_limit=1000`,
+        { credentials: "include", headers },
+      );
+      if (response.ok) {
+        const json = await response.json();
+        for (const att of Array.isArray(json?.result) ? json.result : []) {
+          const name = String(att?.file_name || "").trim();
+          if (name) names.push(name);
+        }
+      }
+    } catch {}
+    return [{ id, names }];
+  })();
+}
+
+function listSparkAttachmentItemsInPage(sysId) {
+  const id = String(sysId || "").trim();
+
+  const VIDEO_EXTS = new Set([
+    "mp4", "m4v", "mov", "avi", "mkv", "webm", "wmv", "flv", "mpeg", "mpg",
+  ]);
+  const IMAGE_EXTS = new Set([
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff", "ico",
+  ]);
+
+  const formatFileSize = (bytes) => {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n < 0) return "";
+    if (n < 1024) return `${n} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let size = n;
+    let unit = "B";
+    for (const u of units) {
+      size /= 1024;
+      unit = u;
+      if (size < 1024) break;
+    }
+    return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
+  };
+
+  const userToken =
+    (typeof window !== "undefined" && window.g_ck) ||
+    document.querySelector('meta[name="X-UserToken"]')?.content ||
+    document.querySelector('input[name="X-UserToken"]')?.value ||
+    "";
+  const headers = { Accept: "application/json" };
+  if (userToken) headers["X-UserToken"] = userToken;
+
+  const itemFrom = (name, sizeBytes, url) => {
+    const ext = (name.split(".").pop() || "").toLowerCase();
+    const type = VIDEO_EXTS.has(ext)
+      ? "video"
+      : IMAGE_EXTS.has(ext)
+        ? "image"
+        : "other";
+    return {
+      name,
+      url,
+      type,
+      size: formatFileSize(sizeBytes),
+      sizeBytes: Number.isFinite(sizeBytes) && sizeBytes >= 0 ? sizeBytes : null,
+    };
+  };
+
+  return (async () => {
+    const items = [];
+    if (!id) return [{ id, items }];
+    try {
+      const response = await fetch(
+        `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=sys_id,file_name,content_type,size_bytes&sysparm_display_value=false&sysparm_limit=1000`,
+        { credentials: "include", headers },
+      );
+      if (response.ok) {
+        const json = await response.json();
+        for (const row of Array.isArray(json?.result) ? json.result : []) {
+          const name = String(row?.file_name || "").trim();
+          if (!name) continue;
+          items.push(
+            itemFrom(
+              name,
+              Number(row?.size_bytes),
+              `${location.origin}/api/now/attachment/${encodeURIComponent(String(row?.sys_id || ""))}/file`,
+            ),
+          );
+        }
+      }
+    } catch {}
+    if (!items.length) {
+      for (const el of document.querySelectorAll('a[href*="/api/now/attachment/"], a[href*="sys_attachment.do"]')) {
+        const name = (el.textContent || "").trim();
+        if (!name) continue;
+        items.push(itemFrom(name, null, el.href));
+      }
+    }
+    return [{ id, items }];
+  })();
+}
+
+function uploadSparkAttachmentsInPage({ sysId, files }) {
+  const id = String(sysId || "").trim();
+
+  const userToken =
+    (typeof window !== "undefined" && window.g_ck) ||
+    document.querySelector('meta[name="X-UserToken"]')?.content ||
+    document.querySelector('input[name="X-UserToken"]')?.value ||
+    "";
+  const headers = { Accept: "application/json" };
+  if (userToken) headers["X-UserToken"] = userToken;
+
+  const dataUrlToBlob = (dataUrl) => {
+    const [meta, payload] = String(dataUrl || "").split(",");
+    const mime =
+      /data:([^;]+);/i.exec(meta || "")?.[1] || "application/octet-stream";
+    let bytes;
+    if (meta && /;base64/i.test(meta)) {
+      const binary = atob(payload || "");
+      bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+    } else {
+      bytes = new TextEncoder().encode(decodeURIComponent(payload || ""));
+    }
+    return new Blob([bytes], { type: mime });
+  };
+
+  const syncLockKey = "__jiraSparkSyncAttachmentsLock__";
+  const acquireSyncLock = () => {
+    try {
+      const top = window.top;
+      if (!top) return true;
+      const held = top[syncLockKey];
+      if (typeof held === "number" && Date.now() - held < 120000) {
+        return false;
+      }
+      top[syncLockKey] = Date.now();
+      return true;
+    } catch {
+      return true;
+    }
+  };
+  const releaseSyncLock = () => {
+    try {
+      if (window.top) window.top[syncLockKey] = 0;
+    } catch {}
+  };
+
+  return (async () => {
+    if (!/incident\.do/.test(location.href)) {
+      return { uploaded: [], failed: [], errors: {}, skipped: true };
+    }
+    if (!acquireSyncLock()) {
+      return { uploaded: [], failed: [], errors: {}, skipped: true };
+    }
+    try {
+      const uploaded = [];
+      const failed = [];
+      const errors = {};
+      for (const file of Array.isArray(files) ? files : []) {
+        const name = String(file?.name || "").trim();
+        if (!name) continue;
+        try {
+          const form = new FormData();
+          form.append("table_name", "incident");
+          form.append("table_sys_id", id);
+          form.append("uploadFile", dataUrlToBlob(file.dataUrl), name);
+          const response = await fetch(
+            `${location.origin}/api/now/attachment/upload`,
+            { method: "POST", credentials: "include", headers, body: form },
+          );
+          if (response.ok) {
+            uploaded.push(name);
+          } else {
+            failed.push(name);
+            const bodyText = await response.text().catch(() => "");
+            errors[name] = `status ${response.status}${bodyText ? `: ${bodyText.slice(0, 200)}` : ""}`;
+          }
+        } catch (err) {
+          failed.push(name);
+          errors[name] = String((err && err.message) || err || "unknown");
+        }
+      }
+      return { uploaded, failed, errors, skipped: false };
+    } finally {
+      releaseSyncLock();
+    }
+  })();
+}
+
 export async function fetchSparkCommentsInTab(ids) {
   const currentTab = await getCurrentTab();
   const idList = Array.isArray(ids) ? ids : [ids];
@@ -1811,26 +2053,210 @@ export async function fetchSparkCommentsInTab(ids) {
   return best;
 }
 
-function postJiraCommentsInSparkPage({ sysId, jiraOrigin, issueKey, comments }) {
+function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
   const userToken =
     (typeof window !== "undefined" && window.g_ck) ||
     document.querySelector('meta[name="X-UserToken"]')?.content ||
     document.querySelector('input[name="X-UserToken"]')?.value ||
     "";
 
-  const markerOf = (c) =>
-    `${jiraOrigin}/browse/${issueKey}?focusedCommentId=${c.id}`;
-  const commentText = (c) =>
-    `[Jira comment] ${c.author || "unknown"} · ${c.created || ""}\n${markerOf(c)}\n\n${c.body}`;
+  const mappedIdSet = new Set(
+    Array.isArray(mappedIds)
+      ? mappedIds
+      : mappedIds && typeof mappedIds.has === "function"
+        ? Array.from(mappedIds)
+        : [],
+  );
+
+  const commentText = (c) => String(c.body || "").trim();
+
+  const syncLockKey = "__jiraSparkSyncPostingLock__";
+  const acquireSyncLock = () => {
+    try {
+      const top = window.top;
+      if (!top) return true;
+      const held = top[syncLockKey];
+      if (typeof held === "number" && Date.now() - held < 120000) {
+        return false;
+      }
+      top[syncLockKey] = Date.now();
+      return true;
+    } catch {
+      return true;
+    }
+  };
+  const releaseSyncLock = () => {
+    try {
+      if (window.top) window.top[syncLockKey] = 0;
+    } catch {}
+  };
 
   const findWorkNotesComposer = () =>
     document.querySelector('textarea[data-stream-text-input="work_notes"]') ||
-    document.querySelector("#activity-stream-work_notes-textarea");
-
-  const findWorkNotesField = () =>
+    document.querySelector("#activity-stream-work_notes-textarea") ||
     document.querySelector(
       'textarea[name$=".work_notes"], textarea[name="work_notes"]',
     );
+
+  const findWorkNotesField = () =>
+    document.querySelector(
+      'textarea[name$=".work_notes"], textarea[name="work_notes"], ' +
+        '#work_notes, [data-field-name="work_notes"]',
+    );
+
+  const fetchServerEntries = async (bodies = []) => {
+    const readJournalApi = async () => {
+      const headers = { Accept: "application/json" };
+      if (userToken) headers["X-UserToken"] = userToken;
+      const response = await fetch(
+        `${location.origin}/api/now/table/sys_journal_field?sysparm_query=element_id=${encodeURIComponent(sysId)}^ORDERBYsys_created_on&sysparm_fields=element,value,sys_created_by,sys_created_on,sys_id&sysparm_display_value=true&sysparm_limit=1000`,
+        { credentials: "include", headers },
+      );
+      if (!response.ok) return { entries: [], source: "journal:blocked" };
+      const json = await response.json();
+      const rows = Array.isArray(json?.result) ? json.result : [];
+      return {
+        entries: rows
+          .map((row) => ({
+            sysId: String(row?.sys_id || "").trim(),
+            text: String(row?.value || "").trim(),
+          }))
+          .filter((e) => e.sysId && e.text),
+        source: "journal",
+      };
+    };
+
+    const readIncidentHtml = async () => {
+      const headers = { Accept: "text/html" };
+      if (userToken) headers["X-UserToken"] = userToken;
+      const response = await fetch(
+        `${location.origin}/incident.do?sys_id=${encodeURIComponent(sysId)}`,
+        { credentials: "include", headers },
+      );
+      if (!response.ok) return { entries: [], source: "html:error" };
+      const doc = new DOMParser().parseFromString(
+        await response.text(),
+        "text/html",
+      );
+      const entries = [];
+      for (const li of doc.querySelectorAll("li[data-journal-id]")) {
+        const text =
+          li.querySelector(".sn-widget-textblock-body")?.textContent?.trim() ||
+          "";
+        const id = li.getAttribute("data-journal-id") || "";
+        if (text && id) entries.push({ sysId: id, text });
+      }
+      return { entries, source: "html" };
+    };
+
+    const readGlideRecord = async () => {
+      if (typeof GlideRecord === "undefined") {
+        return { entries: [], source: "glide:none" };
+      }
+      const entries = [];
+      try {
+        await new Promise((resolve) => {
+          const gr = new GlideRecord("sys_journal_field");
+          gr.addQuery("element_id", sysId);
+          gr.orderBy("sys_created_on");
+          gr.setLimit(1000);
+          gr.query(function () {
+            while (gr.next()) {
+              const text = String(gr.getValue("value") || "").trim();
+              const id = String(gr.getUniqueValue() || "").trim();
+              if (text && id) entries.push({ sysId: id, text });
+            }
+            resolve();
+          });
+        });
+      } catch {}
+      return { entries, source: "glide" };
+    };
+
+    const readIncidentApi = async () => {
+      const headers = { Accept: "application/json" };
+      if (userToken) headers["X-UserToken"] = userToken;
+      const response = await fetch(
+        `${location.origin}/api/now/table/incident/${encodeURIComponent(sysId)}?sysparm_fields=comments,additional_comments,work_notes,comments_and_work_notes&sysparm_display_value=true`,
+        { credentials: "include", headers },
+      );
+      if (!response.ok) return { entries: [], source: "incident:error" };
+      const rec = (await response.json())?.result;
+      const entries = [];
+      const seen = new Set();
+      const parser = (raw) => {
+        const out = [];
+        const labeled = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+-\s+(.+?)\s+\(([^)]+)\)\s*$/;
+        const unlabeled = /^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+-\s+(.+)$/;
+        let current = null;
+        for (const part of String(raw || "").split(/\n\n+/)) {
+          const firstLine = part.split(/\r?\n/)[0];
+          const m = labeled.exec(firstLine) || unlabeled.exec(firstLine);
+          if (m) {
+            if (current) out.push(current);
+            current = { text: part.slice(firstLine.length).trim() };
+          } else if (current) {
+            current.text = `${current.text}\n\n${part.trim()}`.trim();
+          }
+        }
+        if (current) out.push(current);
+        return out;
+      };
+      for (const field of [
+        "comments",
+        "additional_comments",
+        "work_notes",
+        "comments_and_work_notes",
+      ]) {
+        for (const entry of parser(rec?.[field])) {
+          if (entry.text && !seen.has(entry.text)) {
+            seen.add(entry.text);
+            entries.push({ sysId: "", text: entry.text });
+          }
+        }
+      }
+      return { entries, source: "incident" };
+    };
+
+    const results = await Promise.all([
+      readJournalApi(),
+      readGlideRecord(),
+      readIncidentApi(),
+    ]);
+    const merged = [];
+    const seen = new Set();
+    const entryMatches = (entry, body) =>
+      entry.text === body ||
+      (body && body.length > 20 && entry.text.includes(body));
+    for (const r of results) {
+      for (const e of r.entries) {
+        if (e.text && !seen.has(e.text)) {
+          seen.add(e.text);
+          merged.push(e);
+        }
+      }
+    }
+    let sources = results
+      .filter((r) => r.entries.length)
+      .map((r) => r.source)
+      .join("|");
+    const anyBodyMissing =
+      bodies.length > 0 &&
+      !bodies.every((b) => merged.some((e) => entryMatches(e, b)));
+    if (merged.length === 0 || anyBodyMissing) {
+      const html = await readIncidentHtml();
+      for (const e of html.entries) {
+        if (e.text && !seen.has(e.text)) {
+          seen.add(e.text);
+          merged.push(e);
+        }
+      }
+      if (html.entries.length) {
+        sources = sources ? `${sources}|${html.source}` : html.source;
+      }
+    }
+    return { entries: merged, sources: sources || "none" };
+  };
 
   const setFieldValue = (el, text) => {
     let applied = false;
@@ -1941,7 +2367,7 @@ function postJiraCommentsInSparkPage({ sysId, jiraOrigin, issueKey, comments }) 
       streamText +
       (document.body?.innerText || "") +
       bodyHtml
-    ).includes(markerOf(c));
+    ).includes(commentText(c));
     return {
       ok: found,
       stage: found
@@ -1951,7 +2377,77 @@ function postJiraCommentsInSparkPage({ sysId, jiraOrigin, issueKey, comments }) 
     };
   };
 
-  return (async () => {
+  const postViaRest = async (c) => {
+    const text = commentText(c);
+    const attempts = [];
+    const jsonHeaders = {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    };
+    if (userToken) jsonHeaders["X-UserToken"] = userToken;
+
+    const patchRecord = async () => {
+      try {
+        const response = await fetch(
+          `${location.origin}/api/now/table/incident/${encodeURIComponent(sysId)}`,
+          {
+            method: "PATCH",
+            credentials: "include",
+            headers: jsonHeaders,
+            body: JSON.stringify({ work_notes: text }),
+          },
+        );
+        if (!response.ok) {
+          attempts.push(`api:patch:error:${response.status}`);
+          return false;
+        }
+        attempts.push("api:patch:ok");
+        return true;
+      } catch {
+        attempts.push("api:patch:throw");
+        return false;
+      }
+    };
+
+    const formPost = async () => {
+      const formHeaders = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      };
+      if (userToken) formHeaders["X-UserToken"] = userToken;
+      try {
+        const response = await fetch(location.href, {
+          method: "POST",
+          credentials: "include",
+          headers: formHeaders,
+          body: new URLSearchParams({ work_notes: text }).toString(),
+        });
+        if (!response.ok) {
+          attempts.push(`api:form:error:${response.status}`);
+          return false;
+        }
+        const html = await response.text();
+        if (html.includes(text)) {
+          attempts.push("api:form:ok");
+          return true;
+        }
+        attempts.push("api:form:unconfirmed");
+        return false;
+      } catch {
+        attempts.push("api:form:throw");
+        return false;
+      }
+    };
+
+    if (await patchRecord()) {
+      return { ok: true, stage: attempts.join(" -> "), btn: "" };
+    }
+    if (await formPost()) {
+      return { ok: true, stage: attempts.join(" -> "), btn: "" };
+    }
+    return { ok: false, stage: attempts.join(" -> ") || "api:none", btn: "" };
+  };
+
+  const postReport = async () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     const collectTexts = () => {
       const parts = [
@@ -1977,39 +2473,108 @@ function postJiraCommentsInSparkPage({ sysId, jiraOrigin, issueKey, comments }) 
     let existingText = collectTexts();
     let serverText = "";
     let serverEntries = 0;
+    let serverEntryTexts = [];
+    let serverSources = "";
     try {
-      const groups = await fetchSparkCommentsInPage([sysId]);
-      serverEntries = groups[0]?.comments?.length || 0;
-      serverText = (groups[0]?.comments || [])
-        .map((e) => e.text || "")
-        .join("\n");
+      const server = await fetchServerEntries();
+      serverEntries = server.entries.length;
+      serverEntryTexts = server.entries.map((e) => e.text);
+      serverText = serverEntryTexts.join("\n");
+      serverSources = server.sources;
     } catch {}
     if (!serverEntries) {
       const deadline = Date.now() + 6000;
       while (Date.now() < deadline) {
         existingText = collectTexts();
-        if (comments.some((c) => existingText.includes(markerOf(c)))) break;
+        if (
+          comments.some(
+            (c) => commentText(c) && existingText.includes(commentText(c)),
+          )
+        ) {
+          break;
+        }
         if (streamHasEntries()) break;
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
     }
-    const dedupText = `${serverText}\n${existingText}`;
-    const existing = comments.filter((c) =>
-      dedupText.includes(markerOf(c)),
+    const knownEntryTexts = new Set(
+      serverEntryTexts.map((t) => String(t).trim()),
     );
+    const dedupText = `${serverText}\n${existingText}`;
+    const existing = comments.filter((c) => {
+      const body = commentText(c);
+      return (
+        mappedIdSet.has(c.id) ||
+        knownEntryTexts.has(body) ||
+        (body && dedupText.includes(body))
+      );
+    });
     const pending = comments.filter((c) => !existing.includes(c));
     const failedIds = new Set();
     const stages = [];
     const composerBtns = [];
 
     for (const c of pending) {
+      const attempted = [];
+      let res;
       try {
-        const res = await postViaComposer(c);
-        stages.push(res.stage);
-        if (res.btn) composerBtns.push(res.btn);
-        if (!res.ok) failedIds.add(c.id);
+        res = await postViaRest(c);
       } catch {
-        failedIds.add(c.id);
+        res = { ok: false, stage: "api:throw", btn: "" };
+      }
+      attempted.push(res.stage);
+      if (res.btn) composerBtns.push(res.btn);
+      if (!res.ok) {
+        let comp;
+        try {
+          comp = await postViaComposer(c);
+        } catch {
+          comp = { ok: false, stage: "composer:throw", btn: "" };
+        }
+        attempted.push(comp.stage);
+        if (comp.btn) composerBtns.push(comp.btn);
+        res = comp;
+      }
+      stages.push(attempted.join(" -> "));
+      if (!res.ok) failedIds.add(c.id);
+    }
+
+    const entryMatches = (entry, body) =>
+      entry.text === body ||
+      (body && body.length > 20 && entry.text.includes(body));
+
+    const mapping = [];
+    let afterEntries = [];
+    let afterSources = "";
+    if (pending.length - failedIds.size > 0) {
+      let after = { entries: [], sources: "" };
+      try {
+        after = await fetchServerEntries(
+          pending
+            .filter((c) => !failedIds.has(c.id))
+            .map((c) => commentText(c))
+            .filter(Boolean),
+        );
+      } catch {}
+      afterEntries = after.entries;
+      afterSources = after.sources;
+      for (const c of pending) {
+        if (failedIds.has(c.id)) continue;
+        const body = commentText(c);
+        if (!after.entries.some((e) => entryMatches(e, body))) {
+          failedIds.add(c.id);
+        }
+      }
+      for (const c of pending) {
+        if (failedIds.has(c.id)) continue;
+        const body = commentText(c);
+        const entry = after.entries.find((e) => entryMatches(e, body));
+        if (entry?.sysId) {
+          mapping.push({
+            jiraCommentId: c.id,
+            sparkEntrySysId: entry.sysId,
+          });
+        }
       }
     }
 
@@ -2029,19 +2594,26 @@ function postJiraCommentsInSparkPage({ sysId, jiraOrigin, issueKey, comments }) 
         '[name$=".work_notes"][readonly], [id$="work_notes"][readonly]',
       ).length,
     };
+    const loginWall = /login\.do|signin|sign\.in|log\s*in/i.test(
+      `${location.href} ${document.body?.innerText?.slice(0, 2000) || ""}`,
+    );
     const detail = [
       `token=${userToken ? "yes" : "no"}`,
       `existing=${existing.length}`,
       `server_entries=${serverEntries}`,
+      `server_sources=${serverSources || "none"}`,
       `url=${location.href}`,
       `title=${document.title}`,
+      `login_wall=${loginWall ? "yes" : "no"}`,
       `note_textareas=${probe.noteTextareas}`,
       `wn_fields=${probe.workNotesFields}`,
       `wn_readonly=${probe.readonlyWorkNotes}`,
       `stages=${stages.join(",") || "none"}`,
       `composer_btn=${[...new Set(composerBtns)].join(" | ").slice(0, 80) || "none"}`,
       `posted=${pending.length - failedIds.size}/${pending.length}`,
-      `marker_in_body=${comments.length ? (document.body?.innerText || "").includes(markerOf(comments[0])) ? "yes" : "no" : "?"}`,
+      `after_entries=${afterEntries.length}`,
+      `after_sources=${afterSources || "none"}`,
+      `marker_in_body=${comments.length ? (document.body?.innerText || "").includes(commentText(comments[0])) ? "yes" : "no" : "?"}`,
     ].join(", ");
     return {
       posted: pending.length - failedIds.size,
@@ -2049,8 +2621,50 @@ function postJiraCommentsInSparkPage({ sysId, jiraOrigin, issueKey, comments }) 
       skipped,
       total: comments.length,
       hasFields,
+      wnFields: probe.workNotesFields,
+      url: location.href,
+      loginWall,
       detail,
+      mapping,
     };
+  };
+
+  return (async () => {
+    if (!acquireSyncLock()) {
+      return {
+        posted: 0,
+        failed: 0,
+        skipped: comments.length,
+        total: comments.length,
+        hasFields: false,
+        wnFields: -1,
+        url: location.href,
+        loginWall: false,
+        skippedByLock: true,
+        detail: "skipped — another frame is handling the posting",
+        mapping: [],
+      };
+    }
+    try {
+      return await postReport();
+    } catch (err) {
+      return {
+        posted: 0,
+        failed: comments.length,
+        skipped: 0,
+        total: comments.length,
+        hasFields: false,
+        wnFields: 0,
+        url: location.href,
+        loginWall: /login\.do|signin|sign\.in|log\s*in/i.test(
+          `${location.href} ${document.body?.innerText?.slice(0, 2000) || ""}`,
+        ),
+        detail: `injected-error=${String((err && err.message) || err || "unknown")}`,
+        mapping: [],
+      };
+    } finally {
+      releaseSyncLock();
+    }
   })();
 }
 
@@ -2064,5 +2678,9 @@ export {
   scrapeSelectedSparkListingInPage,
   fetchListingDetailsInPage,
   fetchSparkCommentsInPage,
+  fetchSparkAttachmentsInPage,
+  listSparkAttachmentNamesInPage,
+  listSparkAttachmentItemsInPage,
+  uploadSparkAttachmentsInPage,
   postJiraCommentsInSparkPage,
 };

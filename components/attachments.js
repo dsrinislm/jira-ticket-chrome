@@ -3,6 +3,7 @@ import {
   uploadJiraAttachment,
   listIssueAttachments,
   updateJiraIssueDescription,
+  invalidateJiraIssueWithAttachments,
 } from "./api.js";
 import {
   dataUrlToBlob,
@@ -31,7 +32,7 @@ export function failedAttachmentNames(failedNames = []) {
   return failedNames.length ? ` (${failedNames.join(", ")})` : "";
 }
 
-function dataUrlSize(dataUrl) {
+export function dataUrlSize(dataUrl) {
   if (!dataUrl) return 0;
   const idx = dataUrl.indexOf(",");
   const b64 = idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl;
@@ -112,6 +113,10 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
     Array.from({ length: Math.min(MAX_CONCURRENT, images.length) }, uploadOne),
   );
 
+  if (images.length) {
+    invalidateJiraIssueWithAttachments(jiraOrigin, issueKey);
+  }
+
   report();
   reportFiles();
   return { byPlaceholder, failed, firstError, failedImages, cancelled: cancelRequested };
@@ -149,12 +154,31 @@ export async function attachImagesToIssue(jiraOrigin, issueKey, images, descript
   };
 }
 
-export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onProgress, onFile) {
-  const existing = new Set(await listIssueAttachments(jiraOrigin, issueKey));
+export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onProgress, onFile, existingNames) {
+  const existing = new Map();
+  if (existingNames instanceof Map) {
+    for (const [name, size] of existingNames) {
+      existing.set(name, size ?? null);
+    }
+  } else {
+    const names =
+      existingNames instanceof Set
+        ? existingNames
+        : new Set(await listIssueAttachments(jiraOrigin, issueKey));
+    for (const name of names) existing.set(name, null);
+  }
   const files = images.filter((img) => img.name);
-  const missing = files.filter(
-    (img) => !existing.has(imageUploadFilename(img)),
-  );
+  const missing = files.filter((img) => {
+    const name = imageUploadFilename(img);
+    if (!existing.has(name)) return true;
+    const jiraSize = existing.get(name);
+    if (jiraSize == null) return false;
+    const imgSize = Number(
+      img.sizeBytes ?? img.size ?? dataUrlSize(img.dataUrl) ?? NaN,
+    );
+    if (!Number.isFinite(imgSize)) return false;
+    return imgSize !== jiraSize;
+  });
 
   if (!missing.length) {
     return { failed: 0, firstError: "", uploaded: 0, uploadedNames: [], skipped: files.length };

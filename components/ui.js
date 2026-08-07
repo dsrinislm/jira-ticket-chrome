@@ -2,6 +2,12 @@ import { formatBytes, escapeHtml } from "./util.js";
 
 const el = (id) => document.getElementById(id);
 
+let jiraSyncFlowActive = false;
+
+export function setJiraSyncFlowActive(active) {
+  jiraSyncFlowActive = Boolean(active);
+}
+
 export const statusDiv = el("status");
 export const statusText = el("statusText");
 export const ticketResult = el("ticketResult");
@@ -139,6 +145,10 @@ export function setAttachmentNote(message) {
 
 export function refreshSingleViewStatus() {
   if (bulkView.hidden) {
+    if (jiraSyncFlowActive) {
+      setStatus("Sync updates with Spark", "info");
+      return;
+    }
     const configured =
       jiraBaseUrlInput.value.trim() && projectKeyInput.value.trim();
     setStatus(
@@ -198,7 +208,7 @@ export function renderAttachmentPicker(items, syncedNames = new Set()) {
       checkbox.dataset.name = item.name;
       if (alreadySynced) {
         checkbox.disabled = true;
-        checkbox.title = "Already on Jira — will be skipped on sync";
+        checkbox.title = "Already synced — will be skipped on sync";
       }
       checkbox.addEventListener("change", () => {
         if (alreadySynced) return;
@@ -278,6 +288,11 @@ function updateAttachmentIncludeSyncState() {
   const allSynced =
     attachmentPickerHasNoAttachments ||
     (allBoxes.length > 0 && boxes.length === 0);
+  if (jiraSyncFlowActive) {
+    includeAttachmentsInput.disabled = allSynced;
+    if (allSynced) includeAttachmentsInput.checked = false;
+    return;
+  }
   if (allSynced) {
     includeAttachmentsInput.checked = true;
     includeAttachmentsInput.disabled = true;
@@ -781,6 +796,10 @@ export function setBusy(isBusy) {
   if (!isBusy) updateAttachmentIncludeSyncState();
 }
 
+export function getBusy() {
+  return singleBusy;
+}
+
 export function collapseAttachmentPickers() {
   for (const picker of [attachmentPicker, bulkAttachmentPicker]) {
     if (!picker || picker.hidden) continue;
@@ -851,6 +870,8 @@ export function switchView(view, focusTab = true) {
 
   if (isBulk) {
     updateBulkStatusMessage();
+  } else if (jiraSyncFlowActive) {
+    setStatus("Sync updates with Spark", "info");
   } else {
     const jiraConfigured =
       jiraBaseUrlInput.value.trim() && projectKeyInput.value.trim();

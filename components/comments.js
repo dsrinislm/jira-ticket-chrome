@@ -1,4 +1,5 @@
 import { listJiraComments, addJiraComment } from "./api.js";
+import { isEntryFromJira } from "./comment-map.js";
 
 export function sparkCommentHeader(entry) {
   const kind = entry?.kind === "work_notes" ? "work note" : "comment";
@@ -10,20 +11,41 @@ export function sparkCommentBody(entry) {
   return entry.text ? `${header}\n\n${entry.text}` : header;
 }
 
-export async function syncSparkComments(jiraOrigin, issueKey, entries) {
+export async function syncSparkComments(
+  jiraOrigin,
+  issueKey,
+  entries,
+  sparkSysId,
+  existingBodies,
+) {
   if (!jiraOrigin || !issueKey || !entries?.length) {
     return { added: 0, total: 0 };
   }
   try {
-    const existing = await listJiraComments(jiraOrigin, issueKey);
+    const existing =
+      existingBodies || (await listJiraComments(jiraOrigin, issueKey));
     const known = new Set(
       existing
         .map((body) => String(body || "").split("\n")[0].trim())
         .filter(Boolean),
     );
+    const knownBodies = new Set(
+      existing.map((body) => String(body || "").trim()).filter(Boolean),
+    );
     let added = 0;
     for (const entry of entries) {
-      if (/^\[Jira comment\]/i.test(String(entry.text || "").trim())) {
+      const text = String(entry.text || "").trim();
+      if (/^\[Jira comment\]/i.test(text)) {
+        continue;
+      }
+      if (knownBodies.has(text)) {
+        continue;
+      }
+      if (
+        sparkSysId &&
+        entry.sysId &&
+        (await isEntryFromJira(sparkSysId, entry.sysId))
+      ) {
         continue;
       }
       const header = sparkCommentHeader(entry);

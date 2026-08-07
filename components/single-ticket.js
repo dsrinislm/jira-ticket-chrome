@@ -17,14 +17,24 @@ import {
 import { getJiraContext } from "./validation.js";
 import { saveSettings, saveProjectHistory } from "./storage.js";
 import { formatBytes } from "./util.js";
-import { getPageData, detectSiteInTab, fetchSparkCommentsInTab } from "./scrape.js";
-import { detectJiraIssueInTab, syncJiraCommentsToSpark } from "./jira-to-spark.js";
+import {
+  getPageData,
+  detectSiteInTab,
+  fetchSparkCommentsInTab,
+  getCurrentTab,
+} from "./scrape.js";
+import {
+  detectJiraIssueInTab,
+  syncJiraCommentsToSpark,
+  syncSparkAttachmentsInOrigin,
+} from "./jira-to-spark.js";
 import {
   isJiraLoggedIn,
   validateProject,
-  findExistingJiraIssue,
+  findExistingJiraIssueFor,
   createJiraIssue,
-  listIssueAttachments,
+  getJiraIssueWithAttachments,
+  listJiraCommentsDetailed,
 } from "./api.js";
 import { syncSparkComments } from "./comments.js";
 import { sourceUrlBlock } from "./adf.js";
@@ -33,9 +43,10 @@ import {
   failedAttachmentNames,
   uploadMissingAttachments,
   attachImagesToIssue,
+  dataUrlSize,
 } from "./attachments.js";
 
-async function syncSparkCommentsForTicket(jiraOrigin, issueKey, pageData) {
+async function syncSparkCommentsForTicket(jiraOrigin, issueKey, pageData, existingBodies) {
   if (getSourceSite() !== "Spark" || !issueKey || !pageData?.url) {
     return { added: 0, total: 0 };
   }
@@ -45,7 +56,13 @@ async function syncSparkCommentsForTicket(jiraOrigin, issueKey, pageData) {
     return [];
   });
   const entries = groups[0]?.comments || [];
-  return syncSparkComments(jiraOrigin, issueKey, entries);
+  return syncSparkComments(
+    jiraOrigin,
+    issueKey,
+    entries,
+    sysIdMatch[1],
+    existingBodies,
+  );
 }
 
 export async function createTicket() {
@@ -126,10 +143,11 @@ export async function createTicket() {
 
     setStatus("Checking for an existing ticket...", "loading");
 
-    const existing = await findExistingJiraIssue(
+    const existing = await findExistingJiraIssueFor(
       jiraOrigin,
       projectKey,
       finalSummary,
+      pageData.url,
     );
 
     if (existing.error) {
@@ -142,6 +160,7 @@ export async function createTicket() {
 
       let finalStatus = "";
       let finalStatusType = "success";
+      let jiraAttachments = [];
 
       if (includeAttachments && pageData.images?.length) {
         setStatus(
@@ -149,13 +168,27 @@ export async function createTicket() {
           "loading",
         );
         let missing = pageData.images;
+        let existingNames = new Set();
         try {
-          const existingNames = new Set(
-            await listIssueAttachments(jiraOrigin, existing.issue.key),
+          const combined = await getJiraIssueWithAttachments(
+            jiraOrigin,
+            existing.issue.key,
           );
-          missing = pageData.images.filter(
-            (img) => !existingNames.has(imageUploadFilename(img)),
+          jiraAttachments = combined.attachments;
+          existingNames = new Map(
+            combined.attachments.map((a) => [a.name, Number(a.size) || null]),
           );
+          missing = pageData.images.filter((img) => {
+            const name = imageUploadFilename(img);
+            if (!existingNames.has(name)) return true;
+            const jiraSize = existingNames.get(name);
+            if (jiraSize == null) return false;
+            const imgSize = Number(
+              img.sizeBytes ?? img.size ?? dataUrlSize(img.dataUrl) ?? NaN,
+            );
+            if (!Number.isFinite(imgSize)) return false;
+            return imgSize !== jiraSize;
+          });
         } catch {
 
         }
@@ -196,6 +229,8 @@ export async function createTicket() {
                   total,
                   `Uploading ${formatBytes(loaded)} of ${formatBytes(total)}…`,
                 ),
+              undefined,
+              existingNames,
             );
             setSyncProgressVisible(false);
 
@@ -218,10 +253,59 @@ export async function createTicket() {
         finalStatus = `Ticket already exists: ${existing.issue.key}`;
       }
 
+      if (includeAttachments && jiraAttachments.length) {
+        const selected = new Set(
+          Array.isArray(selectedAttachments) ? selectedAttachments : [],
+        );
+        const jiraToSpark = selected.size
+          ? jiraAttachments.filter((j) => selected.has(j.name))
+          : jiraAttachments;
+        if (jiraToSpark.length) {
+          try {
+            setStatus(
+              `Syncing ${jiraToSpark.length} Jira attachment(s) to Spark...`,
+              "loading",
+            );
+            const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(pageData.url || "");
+            const currentTab = await getCurrentTab();
+            const sparkBack = await syncSparkAttachmentsInOrigin({
+              jiraOrigin,
+              sparkOrigin: new URL(pageData.url).origin,
+              sysId: sysIdMatch ? sysIdMatch[1] : "",
+              files: jiraToSpark,
+              tab: currentTab,
+            });
+            if (sparkBack.failed > 0) {
+              finalStatus = `${finalStatus} ${sparkBack.failed} attachment(s) failed to sync to Spark${failedAttachmentNames(sparkBack.failedNames)}.`;
+              finalStatusType = "error";
+            } else if (sparkBack.uploaded > 0) {
+              finalStatus = `${finalStatus} ${sparkBack.uploaded} Jira attachment(s) synced to Spark.`;
+            }
+            const failedSet = new Set(sparkBack.failedNames || []);
+            markAttachmentsSynced(
+              jiraToSpark
+                .map((j) => j.name)
+                .filter((n) => !failedSet.has(n)),
+            );
+          } catch {
+            finalStatus = `${finalStatus} Couldn't sync Jira attachments to Spark.`;
+          }
+        }
+      }
+
+      let jiraComments = [];
+      try {
+        jiraComments = await listJiraCommentsDetailed(
+          jiraOrigin,
+          existing.issue.key,
+        );
+      } catch {}
+
       const commentSync = await syncSparkCommentsForTicket(
         jiraOrigin,
         existing.issue.key,
         pageData,
+        jiraComments.map((c) => c.body),
       );
       if (commentSync.added > 0) {
         finalStatus = `${finalStatus} ${commentSync.added} comment(s) synced.`;
@@ -236,6 +320,8 @@ export async function createTicket() {
         const { report } = await syncJiraCommentsToSpark({
           jiraOrigin,
           issueKey: existing.issue.key,
+          comments: jiraComments,
+          sourceUrl: pageData.url,
         });
         if (report.posted > 0) {
           backSyncText = ` ${report.posted} Jira comment(s) synced back to Spark.`;

@@ -104,14 +104,14 @@ function escapeJqlString(value) {
   return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
-async function searchByJql(jiraBaseUrl, jql, matches) {
+async function searchByJql(jiraBaseUrl, jql, matches, fields = ["summary"]) {
   let response;
   try {
 
     response = await jiraFetch(jiraBaseUrl, "/rest/api/3/search/jql", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jql, fields: ["summary"], maxResults: 50 }),
+      body: JSON.stringify({ jql, fields, maxResults: 50 }),
     });
   } catch {
     return { error: true, issue: null };
@@ -120,9 +120,7 @@ async function searchByJql(jiraBaseUrl, jql, matches) {
   if (!response.ok) return { error: true, issue: null };
 
   const data = await response.json();
-  const match = (data.issues || []).find((issue) =>
-    matches(issue.fields?.summary),
-  );
+  const match = (data.issues || []).find((issue) => matches(issue.fields));
 
   return { error: false, issue: match || null };
 }
@@ -132,32 +130,104 @@ async function findExistingJiraIssue(jiraBaseUrl, projectKey, summary) {
   if (!target) return { error: false, issue: null };
 
   const projectJql = `project = "${escapeJqlString(projectKey)}"`;
-  const lower = target.toLowerCase();
-
-  const exact = await searchByJql(
-    jiraBaseUrl,
-    `${projectJql} AND summary = "${escapeJqlString(target)}"`,
-    (s) => String(s ?? "").trim().toLowerCase() === lower,
-  );
-  if (exact.issue) return exact;
 
   const prefixed = /^([A-Z]+) \| ([A-Z0-9][A-Z0-9._-]*) \|/i.exec(target);
   if (prefixed) {
     const siteToken = prefixed[1].toUpperCase();
     const id = prefixed[2].toUpperCase();
-
-    const byId = await searchByJql(
+    return searchByJql(
       jiraBaseUrl,
       `${projectJql} AND summary ~ "${escapeJqlString(id)}"`,
-      (s) => {
-        const upper = String(s ?? "").toUpperCase();
+      (fields) => {
+        const upper = String(fields?.summary ?? "").toUpperCase();
         return upper.includes(siteToken) && upper.includes(id);
       },
     );
-    if (byId.issue || byId.error) return byId;
   }
 
-  return exact;
+  const lower = target.toLowerCase();
+  return searchByJql(
+    jiraBaseUrl,
+    `${projectJql} AND summary = "${escapeJqlString(target)}"`,
+    (fields) => String(fields?.summary ?? "").trim().toLowerCase() === lower,
+  );
+}
+
+async function findExistingJiraIssueByUrl(jiraBaseUrl, projectKey, sourceUrl) {
+  const target = String(sourceUrl ?? "").trim();
+  if (!target) return { error: false, issue: null };
+  const sysIdMatch = /[?&]sys_id=([^&]+)/i.exec(target);
+  const token = sysIdMatch ? decodeURIComponent(sysIdMatch[1]).trim() : "";
+  if (!token) return { error: false, issue: null };
+
+  const projectJql = `project = "${escapeJqlString(projectKey)}"`;
+  return searchByJql(
+    jiraBaseUrl,
+    `${projectJql} AND description ~ "${escapeJqlString(token)}"`,
+    (fields) =>
+      JSON.stringify(fields?.description || {}).includes(token),
+    ["description"],
+  );
+}
+
+async function findExistingJiraIssueFor(
+  jiraBaseUrl,
+  projectKey,
+  summary,
+  sourceUrl,
+) {
+  return findExistingJiraIssueForUncached(
+    jiraBaseUrl,
+    projectKey,
+    summary,
+    sourceUrl,
+  );
+}
+
+async function findExistingJiraIssueForUncached(
+  jiraBaseUrl,
+  projectKey,
+  summary,
+  sourceUrl,
+) {
+  const target = String(summary ?? "").trim();
+  const sysIdMatch = sourceUrl
+    ? /[?&]sys_id=([^&]+)/i.exec(String(sourceUrl).trim())
+    : null;
+  const token = sysIdMatch ? decodeURIComponent(sysIdMatch[1]).trim() : "";
+
+  const prefixed = /^([A-Z]+) \| ([A-Z0-9][A-Z0-9._-]*) \|/i.exec(target);
+  const siteToken = prefixed ? prefixed[1].toUpperCase() : "";
+  const summaryId = prefixed ? prefixed[2].toUpperCase() : "";
+
+  const conditions = [];
+  if (token) conditions.push(`description ~ "${escapeJqlString(token)}"`);
+  if (summaryId) conditions.push(`summary ~ "${escapeJqlString(summaryId)}"`);
+  if (conditions.length) {
+    const projectJql = `project = "${escapeJqlString(projectKey)}"`;
+    return searchByJql(
+      jiraBaseUrl,
+      `${projectJql} AND (${conditions.join(" OR ")})`,
+      (fields) => {
+        if (
+          token &&
+          JSON.stringify(fields?.description || {}).includes(token)
+        ) {
+          return true;
+        }
+        if (
+          summaryId &&
+          String(fields?.summary ?? "").toUpperCase().includes(siteToken) &&
+          String(fields?.summary ?? "").toUpperCase().includes(summaryId)
+        ) {
+          return true;
+        }
+        return false;
+      },
+      ["description", "summary"],
+    );
+  }
+  return findExistingJiraIssue(jiraBaseUrl, projectKey, summary);
 }
 
 async function createJiraIssue(jiraBaseUrl, projectKey, summary, description) {
@@ -366,6 +436,46 @@ async function listIssueAttachments(jiraBaseUrl, issueKey) {
   return Array.isArray(attachments) ? attachments.map((a) => a.filename) : [];
 }
 
+async function listIssueAttachmentItems(jiraBaseUrl, issueKey) {
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=attachment`,
+  );
+  if (!response.ok) throw new Error(`Couldn't list attachments (status ${response.status}).`);
+  const data = await response.json();
+  const attachments = data?.fields?.attachment;
+  return Array.isArray(attachments)
+    ? attachments
+        .map((a) => ({
+          name: String(a.filename || "").trim(),
+          id: String(a.id || "").trim(),
+          size: Number(a.size),
+          mimeType: String(a.mimeType || ""),
+        }))
+        .filter((a) => a.name && a.id)
+    : [];
+}
+
+async function fetchJiraAttachmentDataUrl(jiraBaseUrl, attachmentId) {
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    `/rest/api/3/attachment/content/${encodeURIComponent(attachmentId)}`,
+    { headers: { Accept: "*/*" } },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `Couldn't download Jira attachment (status ${response.status}).`,
+    );
+  }
+  const blob = await response.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("Couldn't read Jira attachment."));
+    reader.readAsDataURL(blob);
+  });
+}
+
 function textToAdf(text) {
   if (typeof text !== "string") text = String(text ?? "");
   const lines = text.split("\n");
@@ -445,6 +555,45 @@ async function getJiraIssue(jiraBaseUrl, issueKey) {
   return response.json();
 }
 
+let pendingCombinedIssue = null;
+
+function invalidateJiraIssueWithAttachments(jiraBaseUrl, issueKey) {
+  if (
+    pendingCombinedIssue &&
+    pendingCombinedIssue.key === `${jiraBaseUrl}:${issueKey}`
+  ) {
+    pendingCombinedIssue = null;
+  }
+}
+
+async function getJiraIssueWithAttachments(jiraBaseUrl, issueKey) {
+  const cacheKey = `${jiraBaseUrl}:${issueKey}`;
+  if (pendingCombinedIssue && pendingCombinedIssue.key === cacheKey) {
+    return pendingCombinedIssue.value;
+  }
+  const response = await jiraFetch(
+    jiraBaseUrl,
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=description,summary,attachment`,
+  );
+  if (!response.ok) {
+    throw new Error(`Couldn't fetch issue (status ${response.status}).`);
+  }
+  const data = await response.json();
+  const attachments = Array.isArray(data?.fields?.attachment)
+    ? data.fields.attachment
+        .map((a) => ({
+          name: String(a.filename || "").trim(),
+          id: String(a.id || "").trim(),
+          size: Number(a.size),
+          mimeType: String(a.mimeType || ""),
+        }))
+        .filter((a) => a.name && a.id)
+    : [];
+  const value = { issue: data, attachments };
+  pendingCombinedIssue = { key: cacheKey, value };
+  return value;
+}
+
 async function addJiraComment(jiraBaseUrl, issueKey, body) {
   const response = await jiraFetch(
     jiraBaseUrl,
@@ -486,12 +635,18 @@ export {
   isJiraLoggedIn,
   validateProject,
   findExistingJiraIssue,
+  findExistingJiraIssueByUrl,
+  findExistingJiraIssueFor,
   createJiraIssue,
   uploadJiraAttachment,
   updateJiraIssueDescription,
   listIssueAttachments,
+  listIssueAttachmentItems,
+  fetchJiraAttachmentDataUrl,
   listJiraComments,
   listJiraCommentsDetailed,
   getJiraIssue,
+  getJiraIssueWithAttachments,
+  invalidateJiraIssueWithAttachments,
   addJiraComment,
 };
