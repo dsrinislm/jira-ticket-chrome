@@ -485,11 +485,6 @@ export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sy
                 (b[0]?.items?.length || 0) - (a[0]?.items?.length || 0),
             )[0]?.[0]?.items || [];
         for (const item of items) existing.set(item.name, item.sizeBytes ?? null);
-        if (!items.length) {
-          console.warn(
-            "[joshub] Spark attachment listing returned empty — dedupe unavailable, all Jira attachments will be (re)uploaded.",
-          );
-        }
       } catch {}
     }
     const outcomes = new Array(files.length);

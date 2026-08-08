@@ -430,10 +430,14 @@ export async function runListingImport(site) {
                   ? (done, total) => updateBulkMediaFiles(mediaRow, done, total)
                   : undefined,
               );
-              if (syncReport.uploadedNames?.length) {
+              const syncedNames = [
+                ...(syncReport.uploadedNames || []),
+                ...(syncReport.skippedNames || []),
+              ];
+              if (syncedNames.length) {
                 uploadedAttachments[String(items[index].id)] = (
                   uploadedAttachments[String(items[index].id)] || []
-                ).concat(syncReport.uploadedNames);
+                ).concat(syncedNames);
               }
               if (syncReport.failed > 0) {
                 statusHtml = `Already exists — ${existsLink} — ${syncReport.failed} attachment(s) failed to sync${failedAttachmentNames(syncReport.failedNames)}`;

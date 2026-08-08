@@ -96,7 +96,6 @@ import {
   getJiraContext,
 } from "./components/validation.js";
 import {
-  findExistingJiraIssue,
   findExistingJiraIssueFor,
   getJiraIssueWithAttachments,
   listIssueAttachments,
@@ -294,9 +293,6 @@ async function runSyncUpdates() {
       }
       setStatus("Ticket fully synced! try new one.", "success");
       return;
-    }
-    if (report.debug) {
-      console.warn("[joshub] sync diagnostics:", report.debug);
     }
     if (report.loginWall) {
       const notSynced =
@@ -646,7 +642,12 @@ async function buildBulkSyncedMap(items, site) {
             ? `SPARK | ${item.number || item.id} | ${item.name || ""}`
             : item.name || "";
         if (!title) continue;
-        const found = await findExistingJiraIssue(jiraOrigin, projectKey, title);
+        const found = await findExistingJiraIssueFor(
+          jiraOrigin,
+          projectKey,
+          title,
+          item.url,
+        );
         if (!found.issue) continue;
         const names = await listIssueAttachments(jiraOrigin, found.issue.key);
         synced[String(item.id)] = new Set(names);

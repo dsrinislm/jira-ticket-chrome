@@ -2676,11 +2676,6 @@ function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
       `after_sources=${afterSources || "none"}`,
       `marker_in_body=${comments.length ? (document.body?.innerText || "").includes(commentText(comments[0])) ? "yes" : "no" : "?"}`,
     ].join(", ");
-    if (loginWall) {
-      console.warn("[joshub] Spark comment sync: session/login wall detected.");
-    } else {
-      console.warn("[joshub] Spark comment sync diagnostics:", detail);
-    }
     return {
       posted: pending.length - failedIds.size,
       failed: failedIds.size,
@@ -2947,11 +2942,6 @@ function postJiraCommentsInOriginPage({ sysId, comments, mappedIds }) {
         `posted=${pending.length - failedIds.size}/${pending.length}`,
         `after_entries=${afterEntries.length}`,
       ].join(", ");
-      if (loginWall) {
-        console.warn("[joshub] Spark comment sync (journal API): session/login wall detected.");
-      } else {
-        console.warn("[joshub] Spark comment sync (journal API) diagnostics:", detail);
-      }
       return {
         posted: pending.length - failedIds.size,
         failed: failedIds.size,

@@ -945,7 +945,7 @@ export function updateBulkStatusMessage() {
     jiraConfigured
       ? excelFlowActive || !activeListingSite || !listingHasSelection
         ? "Upload Octane or Spark report"
-        : "Upload report or Sync selected listing"
+        : "All set - Sync selected listing to continue"
       : "Configure Jira details and create a ticket.",
     "info",
   );
