@@ -456,7 +456,7 @@ async function listIssueAttachmentItems(jiraBaseUrl, issueKey) {
     : [];
 }
 
-async function fetchJiraAttachmentDataUrl(jiraBaseUrl, attachmentId) {
+async function fetchJiraAttachmentDataUrl(jiraBaseUrl, attachmentId, onProgress) {
   const response = await jiraFetch(
     jiraBaseUrl,
     `/rest/api/3/attachment/content/${encodeURIComponent(attachmentId)}`,
@@ -467,7 +467,22 @@ async function fetchJiraAttachmentDataUrl(jiraBaseUrl, attachmentId) {
       `Couldn't download Jira attachment (status ${response.status}).`,
     );
   }
-  const blob = await response.blob();
+  let blob;
+  if (typeof onProgress === "function" && response.body) {
+    const chunks = [];
+    let loaded = 0;
+    const total = Number(response.headers.get("Content-Length")) || 0;
+    for await (const value of response.body) {
+      chunks.push(value);
+      loaded += value.byteLength;
+      onProgress(loaded, total || loaded);
+    }
+    blob = new Blob(chunks, {
+      type: response.headers.get("Content-Type") || "application/octet-stream",
+    });
+  } else {
+    blob = await response.blob();
+  }
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
@@ -555,22 +570,7 @@ async function getJiraIssue(jiraBaseUrl, issueKey) {
   return response.json();
 }
 
-let pendingCombinedIssue = null;
-
-function invalidateJiraIssueWithAttachments(jiraBaseUrl, issueKey) {
-  if (
-    pendingCombinedIssue &&
-    pendingCombinedIssue.key === `${jiraBaseUrl}:${issueKey}`
-  ) {
-    pendingCombinedIssue = null;
-  }
-}
-
 async function getJiraIssueWithAttachments(jiraBaseUrl, issueKey) {
-  const cacheKey = `${jiraBaseUrl}:${issueKey}`;
-  if (pendingCombinedIssue && pendingCombinedIssue.key === cacheKey) {
-    return pendingCombinedIssue.value;
-  }
   const response = await jiraFetch(
     jiraBaseUrl,
     `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=description,summary,attachment`,
@@ -589,9 +589,7 @@ async function getJiraIssueWithAttachments(jiraBaseUrl, issueKey) {
         }))
         .filter((a) => a.name && a.id)
     : [];
-  const value = { issue: data, attachments };
-  pendingCombinedIssue = { key: cacheKey, value };
-  return value;
+  return { issue: data, attachments };
 }
 
 async function addJiraComment(jiraBaseUrl, issueKey, body) {
@@ -647,6 +645,5 @@ export {
   listJiraCommentsDetailed,
   getJiraIssue,
   getJiraIssueWithAttachments,
-  invalidateJiraIssueWithAttachments,
   addJiraComment,
 };

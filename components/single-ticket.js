@@ -9,14 +9,16 @@ import {
   redirectToLogin,
   resetTicketCard,
   revealStatus,
-  updateSyncProgress,
-  setSyncProgressVisible,
+  startSyncAttachmentProgress,
+  addSyncAttachmentProgressRow,
+  setSyncAttachmentProgress,
+  setSyncAttachmentState,
   syncAbortBtn,
+  finishSyncProgress,
   markAttachmentsSynced,
 } from "./ui.js";
 import { getJiraContext } from "./validation.js";
 import { saveSettings, saveProjectHistory } from "./storage.js";
-import { formatBytes } from "./util.js";
 import {
   getPageData,
   detectSiteInTab,
@@ -81,6 +83,14 @@ export async function createTicket() {
     const selectedAttachments = includeAttachments
       ? getSelectedAttachments()
       : undefined;
+
+    let progressStarted = false;
+    const ensureSyncProgress = () => {
+      if (progressStarted) return;
+      progressStarted = true;
+      startSyncAttachmentProgress();
+      syncAbortBtn.disabled = false;
+    };
 
     setStatus("Reading active QA ticket...", "loading");
 
@@ -217,22 +227,37 @@ export async function createTicket() {
               `Uploading ${missing.length} missing attachment(s) with ${existing.issue.key}...`,
               "loading",
             );
-            setSyncProgressVisible(true);
-            syncAbortBtn.disabled = false;
+            ensureSyncProgress();
+            const namedImages = captured.images.filter((img) => img.name);
+            namedImages.forEach((img) => {
+              addSyncAttachmentProgressRow({
+                label: imageUploadFilename(img),
+                size: img.sizeBytes ?? img.size ?? dataUrlSize(img.dataUrl),
+                hint: "Uploading to Jira…",
+              });
+            });
             const attachReport = await uploadMissingAttachments(
               jiraOrigin,
               existing.issue.key,
-              captured.images,
-              (loaded, total) =>
-                updateSyncProgress(
-                  loaded,
-                  total,
-                  `Uploading ${formatBytes(loaded)} of ${formatBytes(total)}…`,
-                ),
+              namedImages,
+              undefined,
               undefined,
               existingNames,
+              (index, loaded, total) =>
+                setSyncAttachmentProgress(index, loaded, total),
             );
-            setSyncProgressVisible(false);
+            const skippedSet = new Set(attachReport.skippedNames || []);
+            const failedSet = new Set(attachReport.failedNames || []);
+            namedImages.forEach((img, i) => {
+              const name = imageUploadFilename(img);
+              if (skippedSet.has(name)) {
+                setSyncAttachmentState(i, "skipped", "Already on Jira");
+              } else if (failedSet.has(name)) {
+                setSyncAttachmentState(i, "failed", "Upload to Jira failed");
+              } else {
+                setSyncAttachmentState(i, "done", "Synced to Jira");
+              }
+            });
 
             markAttachmentsSynced(attachReport.uploadedNames);
             if (attachReport.cancelled) {
@@ -266,6 +291,16 @@ export async function createTicket() {
               `Syncing ${jiraToSpark.length} Jira attachment(s) to Spark...`,
               "loading",
             );
+            ensureSyncProgress();
+            let jiraRowStart = -1;
+            jiraToSpark.forEach((item) => {
+              const idx = addSyncAttachmentProgressRow({
+                label: item.name,
+                size: Number(item.size) || 0,
+                hint: "Queued…",
+              });
+              if (jiraRowStart < 0) jiraRowStart = idx;
+            });
             const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(pageData.url || "");
             const currentTab = await getCurrentTab();
             const sparkBack = await syncSparkAttachmentsInOrigin({
@@ -274,6 +309,10 @@ export async function createTicket() {
               sysId: sysIdMatch ? sysIdMatch[1] : "",
               files: jiraToSpark,
               tab: currentTab,
+              onFileProgress: (index, loaded, total) =>
+                setSyncAttachmentProgress(jiraRowStart + index, loaded, total),
+              onFileState: (index, state, message) =>
+                setSyncAttachmentState(jiraRowStart + index, state, message),
             });
             if (sparkBack.failed > 0) {
               finalStatus = `${finalStatus} ${sparkBack.failed} attachment(s) failed to sync to Spark${failedAttachmentNames(sparkBack.failedNames)}.`;
@@ -372,20 +411,33 @@ export async function createTicket() {
 
     let attachReport = { failed: 0 };
     if (capturedData.images?.length) {
-      setSyncProgressVisible(true);
-      syncAbortBtn.disabled = false;
+      ensureSyncProgress();
+      capturedData.images.forEach((img) => {
+        addSyncAttachmentProgressRow({
+          label: imageUploadFilename(img),
+          size: img.sizeBytes ?? img.size ?? dataUrlSize(img.dataUrl),
+          hint: "Uploading to Jira…",
+        });
+      });
       attachReport = await attachImagesToIssue(
         jiraOrigin,
         issue.key,
         capturedData.images,
         issueDescription,
-        (loaded, total) =>
-          updateSyncProgress(
-            loaded,
-            total,
-            `Uploading ${formatBytes(loaded)} of ${formatBytes(total)}…`,
-          ),
+        undefined,
+        undefined,
+        (index, loaded, total) =>
+          setSyncAttachmentProgress(index, loaded, total),
       );
+      const failedSet = new Set(attachReport.failedNames || []);
+      capturedData.images.forEach((img, i) => {
+        const name = imageUploadFilename(img);
+        if (failedSet.has(name)) {
+          setSyncAttachmentState(i, "failed", "Upload to Jira failed");
+        } else {
+          setSyncAttachmentState(i, "done", "Synced to Jira");
+        }
+      });
     }
 
     markAttachmentsSynced(attachReport.uploadedNames);
@@ -423,7 +475,7 @@ export async function createTicket() {
   } catch (error) {
     setStatus(error.message || "Failed to create ticket.", "error");
   } finally {
-    setSyncProgressVisible(false);
+    finishSyncProgress();
     setBusy(false);
     revealStatus();
   }

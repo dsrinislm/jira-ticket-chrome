@@ -3,7 +3,6 @@ import {
   uploadJiraAttachment,
   listIssueAttachments,
   updateJiraIssueDescription,
-  invalidateJiraIssueWithAttachments,
 } from "./api.js";
 import {
   dataUrlToBlob,
@@ -48,7 +47,7 @@ export function requestUploadCancel() {
   activeXhrs.forEach((xhr) => xhr.abort());
 }
 
-export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onFile) {
+export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onFile, onFileProgress) {
   const byPlaceholder = {};
   const MAX_CONCURRENT = 4;
   let next = 0;
@@ -88,7 +87,12 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
           issueKey,
           dataUrlToBlob(img.dataUrl),
           filename,
-          (loaded) => report(fileBase + loaded),
+          (loaded) => {
+            report(fileBase + loaded);
+            if (typeof onFileProgress === "function") {
+              onFileProgress(index, fileBase + loaded, imageSizes[index]);
+            }
+          },
 
           (xhr) => {
             activeXhrs.add(xhr);
@@ -113,20 +117,16 @@ export async function uploadImages(jiraOrigin, issueKey, images, onProgress, onF
     Array.from({ length: Math.min(MAX_CONCURRENT, images.length) }, uploadOne),
   );
 
-  if (images.length) {
-    invalidateJiraIssueWithAttachments(jiraOrigin, issueKey);
-  }
-
   report();
   reportFiles();
   return { byPlaceholder, failed, firstError, failedImages, cancelled: cancelRequested };
 }
 
-export async function attachImagesToIssue(jiraOrigin, issueKey, images, description, onProgress, onFile) {
+export async function attachImagesToIssue(jiraOrigin, issueKey, images, description, onProgress, onFile, onFileProgress) {
   setStatus("Uploading images...", "loading");
 
   const { byPlaceholder, failed, firstError, failedImages, cancelled } =
-    await uploadImages(jiraOrigin, issueKey, images, onProgress, onFile);
+    await uploadImages(jiraOrigin, issueKey, images, onProgress, onFile, onFileProgress);
 
   setStatus("Attaching images to ticket...", "loading");
 
@@ -154,7 +154,7 @@ export async function attachImagesToIssue(jiraOrigin, issueKey, images, descript
   };
 }
 
-export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onProgress, onFile, existingNames) {
+export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onProgress, onFile, existingNames, onFileProgress) {
   const existing = new Map();
   if (existingNames instanceof Map) {
     for (const [name, size] of existingNames) {
@@ -181,17 +181,23 @@ export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onP
   });
 
   if (!missing.length) {
-    return { failed: 0, firstError: "", uploaded: 0, uploadedNames: [], skipped: files.length };
+    return { failed: 0, firstError: "", uploaded: 0, uploadedNames: [], skipped: files.length, skippedNames: files.map((img) => imageUploadFilename(img)) };
   }
 
+  const missingOriginal = missing.map((img) => files.indexOf(img));
   const { failed, firstError, failedImages, cancelled } = await uploadImages(
     jiraOrigin,
     issueKey,
     missing,
     onProgress,
     onFile,
+    typeof onFileProgress === "function"
+      ? (mi, loaded, total) =>
+          onFileProgress(missingOriginal[mi], loaded, total)
+      : undefined,
   );
   const failedPlaces = new Set(failedImages.map((img) => img.placeholder));
+  const skippedImages = files.filter((img) => !missing.includes(img));
   return {
     failed,
     firstError,
@@ -199,7 +205,8 @@ export async function uploadMissingAttachments(jiraOrigin, issueKey, images, onP
     uploadedNames: missing
       .filter((img) => !failedPlaces.has(img.placeholder))
       .map((img) => imageUploadFilename(img)),
-    skipped: files.length - missing.length,
+    skipped: skippedImages.length,
+    skippedNames: skippedImages.map((img) => imageUploadFilename(img)),
     failedNames: failedImages.map((img) => imageUploadFilename(img)),
     cancelled,
   };

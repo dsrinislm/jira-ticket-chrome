@@ -547,16 +547,15 @@ async function listTicketAttachmentsInPage(site) {
   const formatFileSize = (bytes) => {
     const n = Number(bytes);
     if (!Number.isFinite(n) || n < 0) return "";
-    if (n < 1024) return `${n} B`;
-    const units = ["KB", "MB", "GB", "TB"];
-    let size = n;
-    let unit = "B";
-    for (const u of units) {
+    const units = ["MB", "GB", "TB"];
+    let size = n / 1024;
+    let unit = "KB";
+    let i = 0;
+    while (size >= 1024 && i < units.length) {
       size /= 1024;
-      unit = u;
-      if (size < 1024) break;
+      unit = units[i++];
     }
-    return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
+    return `${size.toFixed(1)} ${unit}`;
   };
 
   if (site.name === "Octane") {
@@ -762,16 +761,15 @@ async function listListingAttachmentsInPage(ids, siteName) {
   const formatFileSize = (bytes) => {
     const n = Number(bytes);
     if (!Number.isFinite(n) || n < 0) return "";
-    if (n < 1024) return `${n} B`;
-    const units = ["KB", "MB", "GB", "TB"];
-    let size = n;
-    let unit = "B";
-    for (const u of units) {
+    const units = ["MB", "GB", "TB"];
+    let size = n / 1024;
+    let unit = "KB";
+    let i = 0;
+    while (size >= 1024 && i < units.length) {
       size /= 1024;
-      unit = u;
-      if (size < 1024) break;
+      unit = units[i++];
     }
-    return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
+    return `${size.toFixed(1)} ${unit}`;
   };
 
   const typeOf = (name) => {
@@ -1543,7 +1541,11 @@ async function fetchSparkCommentsInPage(ids) {
     document.querySelector('input[name="X-UserToken"]')?.value ||
     "";
   const headers = { Accept: "application/json" };
-  if (userToken) headers["X-UserToken"] = userToken;
+  if (userToken) {
+    headers["X-UserToken"] = userToken;
+  } else {
+    headers["Authorization"] = `Basic ${btoa(`__joshub:${Date.now()}`)}`;
+  }
 
   const parseJournalText = (raw) => {
     const entries = [];
@@ -1780,7 +1782,11 @@ function fetchSparkAttachmentsInPage(sysId) {
     document.querySelector('input[name="X-UserToken"]')?.value ||
     "";
   const headers = { Accept: "application/json" };
-  if (userToken) headers["X-UserToken"] = userToken;
+  if (userToken) {
+    headers["X-UserToken"] = userToken;
+  } else {
+    headers["Authorization"] = `Basic ${btoa(`__joshub:${Date.now()}`)}`;
+  }
 
   const toDataUrl = async (url) => {
     try {
@@ -1833,7 +1839,11 @@ function listSparkAttachmentNamesInPage(sysId) {
     document.querySelector('input[name="X-UserToken"]')?.value ||
     "";
   const headers = { Accept: "application/json" };
-  if (userToken) headers["X-UserToken"] = userToken;
+  if (userToken) {
+    headers["X-UserToken"] = userToken;
+  } else {
+    headers["Authorization"] = `Basic ${btoa(`__joshub:${Date.now()}`)}`;
+  }
 
   return (async () => {
     const names = [];
@@ -1868,16 +1878,15 @@ function listSparkAttachmentItemsInPage(sysId) {
   const formatFileSize = (bytes) => {
     const n = Number(bytes);
     if (!Number.isFinite(n) || n < 0) return "";
-    if (n < 1024) return `${n} B`;
-    const units = ["KB", "MB", "GB", "TB"];
-    let size = n;
-    let unit = "B";
-    for (const u of units) {
+    const units = ["MB", "GB", "TB"];
+    let size = n / 1024;
+    let unit = "KB";
+    let i = 0;
+    while (size >= 1024 && i < units.length) {
       size /= 1024;
-      unit = u;
-      if (size < 1024) break;
+      unit = units[i++];
     }
-    return `${Number(size.toFixed(size < 10 ? 1 : 0))} ${unit}`;
+    return `${size.toFixed(1)} ${unit}`;
   };
 
   const userToken =
@@ -1886,7 +1895,30 @@ function listSparkAttachmentItemsInPage(sysId) {
     document.querySelector('input[name="X-UserToken"]')?.value ||
     "";
   const headers = { Accept: "application/json" };
-  if (userToken) headers["X-UserToken"] = userToken;
+  if (userToken) {
+    headers["X-UserToken"] = userToken;
+  } else {
+    headers["Authorization"] = `Basic ${btoa(`__joshub:${Date.now()}`)}`;
+  }
+
+  const loginRequired = () => {
+    const href = location.href;
+    const title = document.title || "";
+    if (
+      /login\.do|login_page|signin|sign\.in|log\s*in|login\.microsoftonline|adfs|saml/i.test(
+        href,
+      )
+    ) {
+      return true;
+    }
+    if (/sign\s*in|log\s*in|microsoft/i.test(title)) {
+      return true;
+    }
+    return !!document.querySelector(
+      '#user_name, input[name="user_name"], #user_password, input[name="user_password"], ' +
+        '#i0116, #passwordInput, input[name="loginfmt"], input[name="passwd"]',
+    );
+  };
 
   const itemFrom = (name, sizeBytes, url) => {
     const ext = (name.split(".").pop() || "").toLowerCase();
@@ -1906,7 +1938,10 @@ function listSparkAttachmentItemsInPage(sysId) {
 
   return (async () => {
     const items = [];
-    if (!id) return [{ id, items }];
+    if (!id) return [{ id, items, loginRequired: false }];
+    if (loginRequired()) return [{ id, items, loginRequired: true }];
+    let apiFailed = false;
+    let loginRequiredFlag = false;
     try {
       const response = await fetch(
         `${location.origin}/api/now/table/sys_attachment?sysparm_query=table_sys_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=sys_id,file_name,content_type,size_bytes&sysparm_display_value=false&sysparm_limit=1000`,
@@ -1925,16 +1960,21 @@ function listSparkAttachmentItemsInPage(sysId) {
             ),
           );
         }
+      } else {
+        apiFailed = true;
+        if (response.status === 401) loginRequiredFlag = true;
       }
-    } catch {}
-    if (!items.length) {
+    } catch {
+      apiFailed = true;
+    }
+    if (apiFailed && !loginRequiredFlag) {
       for (const el of document.querySelectorAll('a[href*="/api/now/attachment/"], a[href*="sys_attachment.do"]')) {
         const name = (el.textContent || "").trim();
         if (!name) continue;
         items.push(itemFrom(name, null, el.href));
       }
     }
-    return [{ id, items }];
+    return [{ id, items, loginRequired: loginRequiredFlag }];
   })();
 }
 
@@ -1947,7 +1987,11 @@ function uploadSparkAttachmentsInPage({ sysId, files }) {
     document.querySelector('input[name="X-UserToken"]')?.value ||
     "";
   const headers = { Accept: "application/json" };
-  if (userToken) headers["X-UserToken"] = userToken;
+  if (userToken) {
+    headers["X-UserToken"] = userToken;
+  } else {
+    headers["Authorization"] = `Basic ${btoa(`__joshub:${Date.now()}`)}`;
+  }
 
   const dataUrlToBlob = (dataUrl) => {
     const [meta, payload] = String(dataUrl || "").split(",");
@@ -2060,6 +2104,16 @@ function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
     document.querySelector('input[name="X-UserToken"]')?.value ||
     "";
 
+  const apiHeaders = (accept) => {
+    const h = { Accept: accept };
+    if (userToken) {
+      h["X-UserToken"] = userToken;
+    } else {
+      h["Authorization"] = `Basic ${btoa(`__joshub:${Date.now()}`)}`;
+    }
+    return h;
+  };
+
   const mappedIdSet = new Set(
     Array.isArray(mappedIds)
       ? mappedIds
@@ -2106,8 +2160,7 @@ function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
 
   const fetchServerEntries = async (bodies = []) => {
     const readJournalApi = async () => {
-      const headers = { Accept: "application/json" };
-      if (userToken) headers["X-UserToken"] = userToken;
+      const headers = apiHeaders("application/json");
       const response = await fetch(
         `${location.origin}/api/now/table/sys_journal_field?sysparm_query=element_id=${encodeURIComponent(sysId)}^ORDERBYsys_created_on&sysparm_fields=element,value,sys_created_by,sys_created_on,sys_id&sysparm_display_value=true&sysparm_limit=1000`,
         { credentials: "include", headers },
@@ -2127,8 +2180,7 @@ function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
     };
 
     const readIncidentHtml = async () => {
-      const headers = { Accept: "text/html" };
-      if (userToken) headers["X-UserToken"] = userToken;
+      const headers = apiHeaders("text/html");
       const response = await fetch(
         `${location.origin}/incident.do?sys_id=${encodeURIComponent(sysId)}`,
         { credentials: "include", headers },
@@ -2174,8 +2226,7 @@ function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
     };
 
     const readIncidentApi = async () => {
-      const headers = { Accept: "application/json" };
-      if (userToken) headers["X-UserToken"] = userToken;
+      const headers = apiHeaders("application/json");
       const response = await fetch(
         `${location.origin}/api/now/table/incident/${encodeURIComponent(sysId)}?sysparm_fields=comments,additional_comments,work_notes,comments_and_work_notes&sysparm_display_value=true`,
         { credentials: "include", headers },
@@ -2615,6 +2666,11 @@ function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
       `after_sources=${afterSources || "none"}`,
       `marker_in_body=${comments.length ? (document.body?.innerText || "").includes(commentText(comments[0])) ? "yes" : "no" : "?"}`,
     ].join(", ");
+    if (loginWall) {
+      console.warn("[joshub] Spark comment sync: session/login wall detected.");
+    } else {
+      console.warn("[joshub] Spark comment sync diagnostics:", detail);
+    }
     return {
       posted: pending.length - failedIds.size,
       failed: failedIds.size,

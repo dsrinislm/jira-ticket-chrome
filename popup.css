@@ -52,12 +52,21 @@
 
 html {
   overflow: hidden;
+  /* Lock the document width so the popup window can never grow wider from
+     horizontally-overflowing content. */
+  width: 460px;
 }
 
 body {
   width: 460px;
   min-height: 480px;
-  max-height: 600px;
+  /* Keep the body's total height under Chrome's 600px popup-window cap. If
+     the body exactly hit the cap, Chrome would add its own ~15px window
+     scrollbar and the popup width would shift by that amount as the
+     scrollbar appeared/disappeared. Staying under the cap means the body's
+     own (gutter-reserved) scrollbar handles overflow and the window width
+     stays constant. */
+  max-height: 592px;
   overflow-y: auto;
   /* Reserve the scrollbar gutter so showing/hiding the vertical scrollbar
      (e.g. when the attachment picker appears) never shrinks the content
@@ -1703,6 +1712,35 @@ tbody tr:last-child td {
 
 .bulk-media-row[data-state="done"] .bulk-media-row-bar {
   background: var(--success);
+}
+
+.bulk-media-row[data-state="failed"] {
+  background: var(--danger-50);
+  border-color: var(--danger);
+}
+
+.bulk-media-row[data-state="failed"] .bulk-media-row-label {
+  color: var(--danger);
+}
+
+.bulk-media-row[data-state="failed"] .bulk-media-row-pct {
+  color: var(--danger);
+}
+
+.bulk-media-row[data-state="failed"] .bulk-media-row-files {
+  color: var(--danger);
+}
+
+.bulk-media-row[data-state="failed"] .bulk-media-row-bar {
+  background: var(--danger);
+}
+
+.bulk-media-row[data-state="skipped"] .bulk-media-row-pct {
+  color: var(--text-muted);
+}
+
+.bulk-media-row[data-state="skipped"] .bulk-media-row-files {
+  color: var(--text-muted);
 }
 
 @media (prefers-reduced-motion: reduce) {

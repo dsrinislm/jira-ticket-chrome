@@ -57,6 +57,7 @@ export default [
         DOMException: "readonly",
         Event: "readonly",
         atob: "readonly",
+        btoa: "readonly",
         GlideRecord: "readonly",
         CSS: "readonly",
       },

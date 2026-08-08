@@ -14,12 +14,22 @@ import {
   uploadSparkAttachmentsInPage,
 } from "./scrape.js";
 import { syncSparkComments } from "./comments.js";
-import { uploadMissingAttachments } from "./attachments.js";
+import {
+  uploadMissingAttachments,
+  dataUrlSize,
+} from "./attachments.js";
+import {
+  startSyncAttachmentProgress,
+  addSyncAttachmentProgressRow,
+  setSyncAttachmentProgress,
+  setSyncAttachmentState,
+  syncAbortBtn,
+} from "./ui.js";
 import {
   getMappedJiraCommentIds,
   addCommentMappings,
 } from "./comment-map.js";
-import { sleep } from "./util.js";
+import { sleep, formatBytes } from "./util.js";
 
 function jiraPageInfoFromUrl(url) {
   const raw = String(url || "");
@@ -108,195 +118,6 @@ function formatDate(value) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function extractUserToken(html) {
-  const meta = /<meta[^>]+name=["']X-UserToken["'][^>]+content=["']([^"']+)["']/i.exec(
-    html,
-  );
-  if (meta) return decodeURIComponent(meta[1]);
-  const input = /<input[^>]+name=["']X-UserToken["'][^>]+value=["']([^"']*)["']/i.exec(
-    html,
-  );
-  if (input) return decodeURIComponent(input[1]);
-  const gck = /window\.g_ck\s*=\s*["']([^"']+)["']/i.exec(html);
-  return gck ? decodeURIComponent(gck[1]) : "";
-}
-
-function parseJournalTexts(doc) {
-  const texts = [];
-  doc.querySelectorAll("li[data-journal-id]").forEach((li) => {
-    const text = li
-      .querySelector(".sn-widget-textblock-body")
-      ?.textContent?.trim();
-    if (text) texts.push(text);
-  });
-  return texts;
-}
-
-function detectFieldName(doc) {
-  const textarea = doc.querySelector('textarea[name="comments"]');
-  return textarea?.name || "comments";
-}
-
-async function readSparkPage(incidentUrl) {
-  const response = await fetch(incidentUrl, {
-    credentials: "include",
-    headers: { Accept: "text/html" },
-  });
-  if (!response.ok) return { ok: false, status: response.status };
-  const html = await response.text();
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const title = (doc.title || "").trim();
-  const isIncidentForm = !!doc.querySelector(
-    'input[name="incident.number"]',
-  );
-  const loginRedirect =
-    !isIncidentForm &&
-    (/login\.do|logon|signin|sign\.in|sso/i.test(html) ||
-      /sign\s*in|log\s*in/i.test(title));
-  if (!isIncidentForm || loginRedirect) {
-    return { ok: false, loginRequired: loginRedirect, title, isIncidentForm };
-  }
-  return {
-    ok: true,
-    userToken: extractUserToken(html),
-    fieldName: detectFieldName(doc),
-    existingTexts: parseJournalTexts(doc),
-    title,
-    isIncidentForm,
-  };
-}
-
-function jiraCommentBody(comment) {
-  return String(comment.body || "").trim();
-}
-
-async function fetchSparkJournalEntries(sparkOrigin, sysId, userToken) {
-  const headers = { Accept: "application/json" };
-  if (userToken) headers["X-UserToken"] = userToken;
-  const url = `${sparkOrigin}/api/now/table/sys_journal_field?sysparm_query=element_id=${encodeURIComponent(sysId)}^ORDERBYsys_created_on&sysparm_fields=element,value,sys_created_by,sys_created_on,sys_id&sysparm_display_value=true&sysparm_limit=1000`;
-  const response = await fetch(url, { credentials: "include", headers });
-  if (!response.ok) return [];
-  const json = await response.json();
-  return (Array.isArray(json?.result) ? json.result : [])
-    .map((row) => ({
-      sysId: String(row?.sys_id || "").trim(),
-      value: String(row?.value || "").trim(),
-    }))
-    .filter((e) => e.sysId && e.value);
-}
-
-async function postCommentsDirect(incidentUrl, page, comments, mappedIds) {
-  const headers = {
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-  };
-  if (page.userToken) headers["X-UserToken"] = page.userToken;
-
-  const pending = comments.filter(
-    (c) =>
-      !mappedIds.has(c.id) &&
-      !page.existingTexts.some((t) => String(t).trim() === jiraCommentBody(c)),
-  );
-  const failedIds = new Set();
-  const confirmations = new Set();
-
-  for (const c of pending) {
-    const text = jiraCommentBody(c);
-    const body = new URLSearchParams();
-    body.append(page.fieldName, text);
-    try {
-      const response = await fetch(incidentUrl, {
-        method: "POST",
-        credentials: "include",
-        headers,
-        body: body.toString(),
-      });
-      if (!response.ok) {
-        failedIds.add(c.id);
-        continue;
-      }
-      const responseHtml = await response.text();
-      if (responseHtml.includes(text)) {
-        confirmations.add(c.id);
-      }
-    } catch {
-      failedIds.add(c.id);
-    }
-  }
-
-  const unconfirmed = pending.filter(
-    (c) => !failedIds.has(c.id) && !confirmations.has(c.id),
-  );
-  let entriesAfter = -1;
-  let recheckLogin = false;
-  let recheckTitle = "";
-  if (unconfirmed.length) {
-    const verified = await readSparkPage(incidentUrl);
-    if (verified.ok) {
-      entriesAfter = verified.existingTexts.length;
-      recheckTitle = verified.title || "";
-      for (const c of unconfirmed) {
-        if (
-          !verified.existingTexts.some(
-            (t) => String(t).trim() === jiraCommentBody(c),
-          )
-        ) {
-          failedIds.add(c.id);
-        }
-      }
-    } else {
-      recheckLogin = Boolean(verified.loginRequired);
-      recheckTitle = verified.title || "";
-      for (const c of unconfirmed) failedIds.add(c.id);
-    }
-  }
-
-  const mapping = [];
-  try {
-    const sparkOrigin = new URL(incidentUrl).origin;
-    const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(incidentUrl);
-    const sysId = sysIdMatch ? decodeURIComponent(sysIdMatch[1]) : null;
-    if (sysId) {
-      const entries = await fetchSparkJournalEntries(
-        sparkOrigin,
-        sysId,
-        page.userToken,
-      );
-      for (const c of pending) {
-        if (failedIds.has(c.id)) continue;
-        const body = jiraCommentBody(c);
-        const entry = entries.find((e) => e.value === body);
-        if (entry) {
-          mapping.push({
-            jiraCommentId: c.id,
-            sparkEntrySysId: entry.sysId,
-          });
-        }
-      }
-    }
-  } catch {}
-
-  const detail = [
-    `field=${page.fieldName}`,
-    `token=${page.userToken ? "yes" : "no"}`,
-    `posted=${pending.length}`,
-    `confirmed_in_post_response=${confirmations.size}`,
-    `entries_after=${entriesAfter}`,
-    `recheck_login=${recheckLogin}`,
-    `recheck_title=${recheckTitle || page.title || "?"}`,
-    `recheck_incident_form=${page.isIncidentForm ? "yes" : "no"}`,
-  ].join(", ");
-
-  return {
-    posted: pending.length - failedIds.size,
-    failed: failedIds.size,
-    skipped: comments.length - pending.length,
-    total: comments.length,
-    mode: "direct",
-    detail,
-    mapping,
-  };
-}
-
 function waitForTabComplete(tabId, timeoutMs = 20000) {
   return new Promise((resolve) => {
     const timeout = setTimeout(finish, timeoutMs);
@@ -377,17 +198,26 @@ async function runInSparkTab({ sparkOrigin, sysId, comments, mappedIds, tab }) {
     };
 
     if (!reports.some((r) => r.hasFields)) {
+      const rawDebug = reports
+        .map((r) => r.debug || r.detail)
+        .filter(Boolean)
+        .join(" | ");
       if (reports.length === 0) {
         let tabUrl = "";
         try {
           tabUrl = (await chrome.tabs.get(activeTab.id))?.url || "";
         } catch {}
-        report.detail = `no frame reported a result — the tab never showed the incident form (tab=${tabUrl || "not found"}${injectError ? `, inject_error=${injectError}` : ""})`;
+        report.detail = "Spark tab never finished loading the incident form — open the incident in Spark and retry.";
+        report.debug = `no frame reported a result (tab=${tabUrl || "not found"}${injectError ? `, inject_error=${injectError}` : ""})`;
       } else if (reports.some((r) => r.loginWall)) {
-        report.detail = `Spark session expired — log in to ${sparkOrigin} in this browser and retry. ${report.detail}`;
+        report.detail = `Spark session expired — log in to ${sparkOrigin} in this browser and retry.`;
+        report.debug = rawDebug;
       } else {
-        report.detail = `${report.detail} — no frame contained the incident form`;
+        report.detail = `Spark comments form not found — open the incident in ${sparkOrigin} and retry.`;
+        report.debug = rawDebug;
       }
+    } else {
+      report.debug = reports.map((r) => r.debug || r.detail).filter(Boolean).join(" | ");
     }
 
     return { ...report, mode: created ? "spark tab (opened)" : "spark tab" };
@@ -452,36 +282,13 @@ export async function syncJiraCommentsToSpark({
     .map((c) => ({ ...c, created: formatDate(c.created) }));
   const mappedIds = await getMappedJiraCommentIds(sysId);
 
-  const incidentUrl = `${sparkOrigin}/incident.do?sys_id=${encodeURIComponent(sysId)}`;
-  const page = await readSparkPage(incidentUrl);
-
-  if (!page.ok && page.loginRequired) {
-    throw new Error(
-      `Please log in to ${sparkOrigin} in this browser, then retry the sync.`,
-    );
-  }
-
-  let report;
-  if (page.ok && page.isIncidentForm && page.userToken) {
-    report = await postCommentsDirect(
-      incidentUrl,
-      page,
-      filtered,
-      mappedIds,
-    );
-  } else {
-    report = await runInSparkTab({
-      sparkOrigin,
-      sysId,
-      comments: filtered,
-      mappedIds,
-      tab,
-    });
-    if (!report.detail) {
-      report.detail =
-        "popup can't reach the authenticated ServiceNow form (cross-site session/CSRF blocked) — wrote from a Spark-origin tab";
-    }
-  }
+  const report = await runInSparkTab({
+    sparkOrigin,
+    sysId,
+    comments: filtered,
+    mappedIds,
+    tab,
+  });
 
   if (Array.isArray(report.mapping) && report.mapping.length) {
     await addCommentMappings(sysId, report.mapping);
@@ -534,54 +341,61 @@ async function fetchSparkAttachmentsInOrigin({ sparkOrigin, sysId, tab }) {
 
 async function fetchSparkAttachmentItemsInOrigin({ sparkOrigin, sysId, tab }) {
   const run = async (activeTab) => {
+    let tabUrl = "";
+    try {
+      tabUrl = (await chrome.tabs.get(activeTab.id))?.url || "";
+    } catch {}
+    if (tabUrl && !tabUrl.startsWith(sparkOrigin)) {
+      return { items: [], loginRequired: true };
+    }
     const results = await chrome.scripting.executeScript({
       target: { tabId: activeTab.id, allFrames: true },
       func: listSparkAttachmentItemsInPage,
       args: [sysId],
       world: "MAIN",
     });
-    const outs = (results || [])
-      .map((r) => r.result)
+    const groups = (results || []).map((r) => r.result);
+    const outs = groups
       .filter((g) => Array.isArray(g) && g.length > 0);
-    return (
+    let loginRequired = false;
+    for (const g of groups) {
+      if (Array.isArray(g) && g.some((r) => r && r.loginRequired)) {
+        loginRequired = true;
+        break;
+      }
+    }
+    if (!outs.length && loginRequired) return { items: [], loginRequired };
+    const items =
       outs.sort(
         (a, b) => (b[0]?.items?.length || 0) - (a[0]?.items?.length || 0),
-      )[0]?.[0]?.items || []
-    );
+      )[0]?.[0]?.items || [];
+    return { items, loginRequired };
   };
   if (tab) return run(tab);
   return useSparkTab({ sparkOrigin, sysId }, run);
 }
 
-export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sysId, files, tab }) {
+export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sysId, files, tab, onProgress, onFileProgress, onFileState }) {
   const run = async (activeTab) => {
-    const uploadOne = async (file) => {
-      try {
-        const dataUrl = await fetchJiraAttachmentDataUrl(jiraOrigin, file.id);
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: activeTab.id, allFrames: true },
-          func: uploadSparkAttachmentsInPage,
-          args: [{ sysId, files: [{ name: file.name, dataUrl }] }],
-          world: "MAIN",
-        });
-        const report = (results || [])
-          .map((r) => r.result)
-          .filter((r) => r && r.skipped !== true)
-          .sort(
-            (a, b) => (b?.uploaded?.length || 0) - (a?.uploaded?.length || 0),
-          )[0];
-        if (report?.uploaded?.length) return { ok: true };
-        return {
-          ok: false,
-          error:
-            report?.errors?.[file.name] || "Spark rejected the upload.",
-        };
-      } catch (err) {
-        return {
-          ok: false,
-          error: String((err && err.message) || err || "unknown"),
-        };
-      }
+    const executeUpload = async (file, dataUrl) => {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: activeTab.id, allFrames: true },
+        func: uploadSparkAttachmentsInPage,
+        args: [{ sysId, files: [{ name: file.name, dataUrl }] }],
+        world: "MAIN",
+      });
+      const report = (results || [])
+        .map((r) => r.result)
+        .filter((r) => r && r.skipped !== true)
+        .sort(
+          (a, b) => (b?.uploaded?.length || 0) - (a?.uploaded?.length || 0),
+        )[0];
+      if (report?.uploaded?.length) return { ok: true };
+      return {
+        ok: false,
+        error:
+          report?.errors?.[file.name] || "Spark rejected the upload.",
+      };
     };
     const existing = new Map();
     try {
@@ -603,23 +417,101 @@ export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sy
     } catch {}
     const outcomes = new Array(files.length);
     let nextIndex = 0;
+    let completed = 0;
+    let uploadChain = Promise.resolve();
+    const totalBytes = files.reduce(
+      (sum, f) => sum + (Number(f.size) || 0),
+      0,
+    );
+    let bytesDownloaded = 0;
+    let bytesUploaded = 0;
+    const fileDownloaded = new Array(files.length).fill(0);
+    const reportProgress = () => {
+      if (typeof onProgress !== "function") return;
+      if (totalBytes > 0) {
+        onProgress(
+          Math.min(bytesDownloaded + bytesUploaded, totalBytes * 2),
+          totalBytes * 2,
+          bytesUploaded > 0
+            ? `Syncing ${formatBytes(bytesUploaded)} of ${formatBytes(totalBytes)} to Spark…`
+            : `Downloading ${formatBytes(bytesDownloaded)} of ${formatBytes(totalBytes)} from Jira…`,
+        );
+      } else {
+        onProgress(completed, files.length, `Syncing attachment ${completed} of ${files.length} to Spark…`);
+      }
+    };
     const worker = async () => {
       while (nextIndex < files.length) {
         const index = nextIndex++;
         const file = files[index];
-        const sparkSize = existing.get(file.name);
-        const same =
-          sparkSize === undefined ||
-          sparkSize === null ||
-          file.size == null ||
-          Number(sparkSize) === Number(file.size);
-        if (existing.has(file.name) && same) {
+        if (existing.has(file.name)) {
+          const size = Number(file.size) || 0;
+          bytesDownloaded += size;
+          bytesUploaded += size;
           outcomes[index] = { file, result: { ok: true, skipped: true } };
-          continue;
+          if (typeof onFileState === "function") {
+            onFileState(index, "skipped", "Already synced on Spark");
+          }
+        } else {
+          if (typeof onFileState === "function") {
+            onFileState(index, "downloading", "Downloading from Jira…");
+          }
+          const dataUrlPromise = fetchJiraAttachmentDataUrl(
+            jiraOrigin,
+            file.id,
+            (loaded) => {
+              const delta = loaded - fileDownloaded[index];
+              fileDownloaded[index] = loaded;
+              bytesDownloaded += delta;
+              reportProgress();
+              if (typeof onFileProgress === "function") {
+                onFileProgress(
+                  index,
+                  loaded,
+                  Number(file.size) || loaded,
+                );
+              }
+            },
+          );
+          const result = await (uploadChain = uploadChain.then(async () => {
+            let dataUrl;
+            try {
+              dataUrl = await dataUrlPromise;
+            } catch (err) {
+              return {
+                ok: false,
+                error: String((err && err.message) || err || "unknown"),
+              };
+            }
+            if (typeof onFileState === "function") {
+              onFileState(index, "uploading", "Uploading to Spark…");
+            }
+            try {
+              const res = await executeUpload(file, dataUrl);
+              if (res.ok) bytesUploaded += Number(file.size) || 0;
+              reportProgress();
+              return res;
+            } catch (err) {
+              return {
+                ok: false,
+                error: String((err && err.message) || err || "unknown"),
+              };
+            }
+          }));
+          if (result.ok) existing.set(file.name, null);
+          outcomes[index] = { file, result };
+          if (typeof onFileState === "function") {
+            onFileState(
+              index,
+              result.ok ? "done" : "failed",
+              result.ok
+                ? "Synced to Spark"
+                : (result.error || "Spark rejected the upload.").slice(0, 120),
+            );
+          }
         }
-        const result = await uploadOne(file);
-        if (result.ok) existing.set(file.name, null);
-        outcomes[index] = { file, result };
+        completed++;
+        reportProgress();
       }
     };
     await Promise.all(
@@ -638,6 +530,7 @@ export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sy
     }
     return {
       uploaded: uploaded.length,
+      uploadedNames: uploaded,
       failed: failedNames.length,
       failedNames,
       firstError,
@@ -674,10 +567,11 @@ export async function getSyncAttachmentItems({ jiraOrigin, issueKey }) {
     return { items: [], syncedNames: new Set() };
   }
   const { sparkOrigin, sysId } = parseSourceUrl(sourceUrl);
-  const sparkItems = await fetchSparkAttachmentItemsInOrigin({
-    sparkOrigin,
-    sysId,
-  }).catch(() => []);
+  const { items: sparkItems, loginRequired } =
+    await fetchSparkAttachmentItemsInOrigin({
+      sparkOrigin,
+      sysId,
+    }).catch(() => ({ items: [], loginRequired: false }));
   const jiraItems = attachments;
   const typeOf = (name) => {
     const ext = (name.split(".").pop() || "").toLowerCase();
@@ -707,12 +601,14 @@ export async function getSyncAttachmentItems({ jiraOrigin, issueKey }) {
     };
     if (byName.has(item.name)) {
       const spark = byName.get(item.name);
-      const sparkSize = spark.sizeBytes ?? null;
-      const sameSize =
-        sparkSize == null || normalized.sizeBytes == null
-          ? true
-          : sparkSize === normalized.sizeBytes;
-      byName.set(item.name, { ...spark, inJira: sameSize });
+      const merged = { ...spark, inJira: true };
+      if (merged.sizeBytes == null || merged.sizeBytes <= 0) {
+        if (normalized.sizeBytes != null && normalized.sizeBytes > 0) {
+          merged.sizeBytes = normalized.sizeBytes;
+          merged.size = formatBytes(normalized.sizeBytes);
+        }
+      }
+      byName.set(item.name, merged);
     } else {
       byName.set(item.name, { ...normalized, source: "Jira" });
     }
@@ -723,7 +619,7 @@ export async function getSyncAttachmentItems({ jiraOrigin, issueKey }) {
   const syncedNames = new Set(
     items.filter((i) => i.inJira).map((i) => i.name),
   );
-  return { items, syncedNames };
+  return { items, syncedNames, loginRequired, sparkOrigin };
 }
 
 export async function syncJiraUpdates({
@@ -736,7 +632,10 @@ export async function syncJiraUpdates({
   let jiraItems = [];
 
   if (includeAttachments) {
-    const combined = await getJiraIssueWithAttachments(jiraOrigin, issueKey);
+    const combined = await getJiraIssueWithAttachments(
+      jiraOrigin,
+      issueKey,
+    );
     issue = combined.issue;
     jiraItems = combined.attachments;
   } else {
@@ -782,7 +681,22 @@ export async function syncJiraUpdates({
         const imagesToSync = selected.size
           ? images.filter((img) => selected.has(img.name))
           : images;
+        let progressReady = false;
+        const ensureProgress = () => {
+          if (progressReady) return;
+          progressReady = true;
+          startSyncAttachmentProgress();
+          syncAbortBtn.disabled = false;
+        };
         if (imagesToSync.length) {
+          ensureProgress();
+          imagesToSync.forEach((img) => {
+            addSyncAttachmentProgressRow({
+              label: img.name,
+              size: img.sizeBytes ?? dataUrlSize(img.dataUrl),
+              hint: "Uploading to Jira…",
+            });
+          });
           attachments = await uploadMissingAttachments(
             jiraOrigin,
             issueKey,
@@ -790,18 +704,45 @@ export async function syncJiraUpdates({
             undefined,
             undefined,
             jiraNames,
+            (index, loaded, total) =>
+              setSyncAttachmentProgress(index, loaded, total),
           );
+          const skippedSet = new Set(attachments.skippedNames || []);
+          const failedSet = new Set(attachments.failedNames || []);
+          imagesToSync.forEach((img, i) => {
+            const name = String(img.name || "");
+            if (skippedSet.has(name)) {
+              setSyncAttachmentState(i, "skipped", "Already on Jira");
+            } else if (failedSet.has(name)) {
+              setSyncAttachmentState(i, "failed", "Upload to Jira failed");
+            } else {
+              setSyncAttachmentState(i, "done", "Synced to Jira");
+            }
+          });
         }
         const jiraToSync = selected.size
           ? jiraItems.filter((item) => selected.has(item.name))
           : jiraItems;
         if (jiraToSync.length) {
+          ensureProgress();
+          const offset = imagesToSync.length;
+          jiraToSync.forEach((item) => {
+            addSyncAttachmentProgressRow({
+              label: item.name,
+              size: Number(item.size) || 0,
+              hint: "Queued…",
+            });
+          });
           attachmentsToSpark = await syncSparkAttachmentsInOrigin({
             jiraOrigin,
             sparkOrigin,
             sysId,
             files: jiraToSync,
             tab,
+            onFileProgress: (index, loaded, total) =>
+              setSyncAttachmentProgress(offset + index, loaded, total),
+            onFileState: (index, state, message) =>
+              setSyncAttachmentState(offset + index, state, message),
           });
         }
       } catch {}
@@ -821,6 +762,7 @@ export async function syncJiraUpdates({
       attachments,
       attachmentsToSpark,
       sourceUrl,
+      sparkOrigin,
       issueKey,
     };
   });

@@ -42,7 +42,9 @@ import {
   includeAttachmentsInput,
   state,
   smoothScrollToBottom,
+  revealStatus,
   syncAbortBtn,
+  finishSyncProgress,
   refreshSingleViewStatus,
   setAttachmentNote,
   attachmentByteSize,
@@ -66,6 +68,11 @@ import {
   jiraToSparkSyncBtn,
   setJiraToSparkVisible,
   setJiraSyncFlowActive,
+  markAttachmentsSynced,
+  updateAttachmentIncludeSyncState,
+  updateBulkIncludeSyncState,
+  showLoginButton,
+  hideLoginButtons,
 } from "./components/ui.js";
 import { debounce } from "./components/util.js";
 import {
@@ -198,6 +205,7 @@ createTicketBtn.addEventListener("click", () => {
 jiraToSparkSyncBtn.addEventListener("click", runSyncUpdates);
 
 async function runSyncUpdates() {
+  hideLoginButtons();
   const ctx = getJiraContext();
   const issue = await detectJiraIssueInTab().catch(() => null);
   if (!ctx) return;
@@ -217,7 +225,7 @@ async function runSyncUpdates() {
   detectionLocked = true;
   try {
     setStatus(`Syncing updates for ${issue.key}...`, "loading");
-    const { report, sparkToJira, attachments, attachmentsToSpark } =
+    const { report, sparkToJira, attachments, attachmentsToSpark, sourceUrl } =
       await syncJiraUpdates({
         jiraOrigin: ctx.jiraOrigin,
         issueKey: issue.key,
@@ -263,22 +271,51 @@ async function runSyncUpdates() {
       report.failed > 0 ||
       attachments?.failed > 0 ||
       attachmentsToSpark?.failed > 0;
+    const uploadedNames = [
+      ...(attachments?.uploadedNames || []),
+      ...(attachmentsToSpark?.uploadedNames || []),
+    ];
+    if (uploadedNames.length) {
+      markAttachmentsSynced(uploadedNames);
+    }
     if (!failed) {
+      const buttonGroup = createTicketBtn?.closest(".button-group");
+      if (buttonGroup) {
+        buttonGroup.style.display = "none";
+      }
       setStatus("Ticket fully synced! try new one.", "success");
+      return;
+    }
+    if (report.debug) {
+      console.warn("[joshub] sync diagnostics:", report.debug);
+    }
+    if (report.loginWall) {
+      const notSynced =
+        (attachmentsToSpark?.failed || 0) + (attachments?.failed || 0);
+      setStatus(
+        `Spark login required.${notSynced ? ` ${notSynced} attachment(s) not synced.` : ""}`,
+        "error",
+      );
+      showLoginButton(
+        sourceUrl || report.url || "https://service-now.com",
+        "Log in to Spark",
+      );
       return;
     }
     const attachmentError = attachmentsToSpark?.firstError
       ? ` ${attachmentsToSpark.firstError}`
       : "";
     setStatus(
-      `${issue.key}: ${bits.join("; ")}${via}.${attachmentError}${failed && report.detail ? ` ${report.detail}` : ""}`,
+      `${issue.key}: ${bits.join("; ")}${via}.${attachmentError}`,
       failed ? "error" : "success",
     );
   } catch (error) {
     setStatus(error.message || "Failed to sync updates.", "error");
   } finally {
+    finishSyncProgress();
     setBusy(false);
     detectionLocked = false;
+    revealStatus();
   }
 }
 
@@ -311,11 +348,26 @@ includeAttachmentsInput.addEventListener("change", async () => {
         clearAttachmentPicker();
         return;
       }
-      const { items, syncedNames } = await getSyncAttachmentItems({
-        jiraOrigin: ctx.jiraOrigin,
-        issueKey: issue.key,
-      });
+      const { items, syncedNames, loginRequired, sparkOrigin } =
+        await getSyncAttachmentItems({
+          jiraOrigin: ctx.jiraOrigin,
+          issueKey: issue.key,
+        });
       if (!getIncludeAttachments()) return;
+      if (loginRequired) {
+        setSyncedTicketFound(false);
+        attachmentGroups.innerHTML =
+          '<div class="attachment-group-title">Not logged in to Spark — log in and retry.</div>';
+        if (attachmentPickerTitle) {
+          attachmentPickerTitle.textContent = "Choose attachments to upload (0)";
+        }
+        showLoginButton(
+          sparkOrigin || "https://service-now.com",
+          "Log in to Spark",
+        );
+        smoothScrollToBottom();
+        return;
+      }
       renderAttachmentPicker(items, syncedNames);
       setAttachmentNote("");
       smoothScrollToBottom();
@@ -393,7 +445,15 @@ includeAttachmentsInput.addEventListener("change", async () => {
           sparkSize == null || normalized.sizeBytes == null
             ? true
             : sparkSize === normalized.sizeBytes;
-        byName.set(j.name, { ...spark, inJira: sameSize });
+        const merged = { ...spark, inJira: sameSize };
+        if (
+          (merged.sizeBytes == null || merged.sizeBytes <= 0) &&
+          normalized.sizeBytes != null &&
+          normalized.sizeBytes > 0
+        ) {
+          merged.sizeBytes = normalized.sizeBytes;
+        }
+        byName.set(j.name, merged);
       } else {
         byName.set(j.name, { ...normalized, source: "Jira" });
       }
@@ -454,6 +514,7 @@ attachmentSelectAll.addEventListener("change", () => {
         .filter((box) => !box.disabled)
         .map((box) => box.dataset.name)
     : [];
+  updateAttachmentIncludeSyncState();
 });
 
 bulkIncludeAttachments.addEventListener("change", async () => {
@@ -611,6 +672,7 @@ bulkAttachmentSelectAll.addEventListener("change", () => {
       for (const box of boxes) if (box.checked) checkedCount++;
       groupCheck.checked = checkedCount > 0 && checkedCount === boxes.length;
     });
+  updateBulkIncludeSyncState();
 });
 
 abortImportBtn.addEventListener("click", () => {
@@ -712,8 +774,14 @@ async function applyDetectedState() {
   if (jiraFlowActive) {
     includeAttachmentsInput.disabled = false;
   }
-  createTicketLabel.textContent = "Sync Updates";
+  createTicketLabel.textContent = jiraFlowActive
+    ? "Sync Updates"
+    : "Create or Sync ticket";
   createTicketBtn.hidden = Boolean(jiraPage) && !jiraFlowActive;
+  const buttonGroup = createTicketBtn.closest(".button-group");
+  if (buttonGroup) {
+    buttonGroup.style.display = "";
+  }
   if (jiraFlowActive && !bulkView.hidden) {
     switchView("single", false);
   }

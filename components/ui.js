@@ -62,7 +62,9 @@ function expandAttachmentPicker(picker) {
 }
 
 export function getIncludeAttachments() {
-  return includeAttachmentsInput.checked;
+  return Boolean(
+    includeAttachmentsInput.checked || includeAttachmentsInput.indeterminate,
+  );
 }
 
 export function setIncludeAttachments(checked) {
@@ -135,6 +137,12 @@ export function attachmentByteSize(item) {
         ? 1024 ** 2
         : 1024;
   return Number(m[1]) * mult;
+}
+
+function itemSizeText(item) {
+  const bytes = Number(item?.sizeBytes);
+  if (Number.isFinite(bytes) && bytes > 0) return formatBytes(bytes);
+  return String(item?.size || "");
 }
 
 export function setAttachmentNote(message) {
@@ -217,6 +225,7 @@ export function renderAttachmentPicker(items, syncedNames = new Set()) {
           ? [...selected, item.name]
           : selected.filter((n) => n !== item.name);
         updateAttachmentSelectAll();
+        updateAttachmentIncludeSyncState();
       });
 
       const name = document.createElement("span");
@@ -224,12 +233,13 @@ export function renderAttachmentPicker(items, syncedNames = new Set()) {
       name.textContent = item.name + (alreadySynced ? " · synced" : "");
       const tip = [];
       if (item.description) tip.push(item.description);
-      if (item.size) tip.push(`Size: ${item.size}`);
+      const sizeText = itemSizeText(item);
+      if (sizeText) tip.push(`Size: ${sizeText}`);
       name.title = tip.join("\n") || item.name;
 
       const size = document.createElement("span");
       size.className = "attachment-item-size";
-      size.textContent = item.size || "";
+      size.textContent = sizeText;
 
       row.append(checkbox, name, size);
       group.appendChild(row);
@@ -277,7 +287,7 @@ function updateAttachmentSelectAll() {
   attachmentSelectAll.indeterminate = checked > 0 && checked < boxes.length;
 }
 
-function updateAttachmentIncludeSyncState() {
+export function updateAttachmentIncludeSyncState() {
   if (!includeAttachmentsInput) return;
   const allBoxes = attachmentGroups.querySelectorAll(
     ".attachment-item input[type='checkbox']",
@@ -285,20 +295,21 @@ function updateAttachmentIncludeSyncState() {
   const boxes = attachmentGroups.querySelectorAll(
     ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
   );
+  const total = allBoxes.length;
+  let covered = 0;
+  for (const box of allBoxes) if (box.checked) covered++;
+
+  if (total > 0) {
+    includeAttachmentsInput.indeterminate = covered > 0 && covered < total;
+    includeAttachmentsInput.checked = covered === total;
+  } else {
+    includeAttachmentsInput.indeterminate = false;
+  }
+
   const allSynced =
     attachmentPickerHasNoAttachments ||
-    (allBoxes.length > 0 && boxes.length === 0);
-  if (jiraSyncFlowActive) {
-    includeAttachmentsInput.disabled = allSynced;
-    if (allSynced) includeAttachmentsInput.checked = false;
-    return;
-  }
-  if (allSynced) {
-    includeAttachmentsInput.checked = true;
-    includeAttachmentsInput.disabled = true;
-  } else {
-    includeAttachmentsInput.disabled = false;
-  }
+    (total > 0 && boxes.length === 0);
+  includeAttachmentsInput.disabled = allSynced;
 
   const fullySyncedTicket = syncedTicketFound && allSynced && ticketCardShown;
   const buttonGroup = createTicketBtn?.closest(".button-group");
@@ -335,7 +346,9 @@ export function markAttachmentsSynced(uploadedNames) {
 }
 
 export function getBulkIncludeAttachments() {
-  return Boolean(bulkIncludeAttachments?.checked);
+  return Boolean(
+    bulkIncludeAttachments?.checked || bulkIncludeAttachments?.indeterminate,
+  );
 }
 
 export function getBulkSelectedAttachments() {
@@ -475,6 +488,7 @@ export function renderBulkAttachmentPicker(groups, labels = {}, syncedMap = {}) 
           box.checked = groupCheckbox.checked;
         });
       updateBulkAttachmentSelectAll();
+      updateBulkIncludeSyncState();
     });
 
     const titleText = document.createElement("span");
@@ -508,16 +522,18 @@ export function renderBulkAttachmentPicker(groups, labels = {}, syncedMap = {}) 
           : sel.filter((n) => n !== item.name);
         updateGroupCheck(ticketId);
         updateBulkAttachmentSelectAll();
+        updateBulkIncludeSyncState();
       });
 
       const name = document.createElement("span");
       name.className = "attachment-item-name";
       name.textContent = item.name + (alreadySynced ? " · synced" : "");
-      name.title = item.size ? `${item.name}\nSize: ${item.size}` : item.name;
+      const sizeText = itemSizeText(item);
+      name.title = sizeText ? `${item.name}\nSize: ${sizeText}` : item.name;
 
       const size = document.createElement("span");
       size.className = "attachment-item-size";
-      size.textContent = item.size || "";
+      size.textContent = sizeText;
 
       row.append(checkbox, name, size);
       block.appendChild(row);
@@ -566,7 +582,7 @@ function updateBulkAttachmentSelectAll() {
 
 let bulkPickerHasNoAttachments = false;
 
-function updateBulkIncludeSyncState() {
+export function updateBulkIncludeSyncState() {
   if (!bulkIncludeAttachments) return;
   const allBoxes = bulkAttachmentGroups.querySelectorAll(
     ".attachment-item input[type='checkbox']",
@@ -574,9 +590,20 @@ function updateBulkIncludeSyncState() {
   const boxes = bulkAttachmentGroups.querySelectorAll(
     ".attachment-item:not(.attachment-item-synced) input[type='checkbox']",
   );
+  const total = allBoxes.length;
+  let covered = 0;
+  for (const box of allBoxes) if (box.checked) covered++;
+
+  if (total > 0) {
+    bulkIncludeAttachments.indeterminate = covered > 0 && covered < total;
+    bulkIncludeAttachments.checked = covered === total;
+  } else {
+    bulkIncludeAttachments.indeterminate = false;
+  }
+
   const allSynced =
     bulkPickerHasNoAttachments ||
-    (allBoxes.length > 0 && boxes.length === 0);
+    (total > 0 && boxes.length === 0);
   if (allSynced) {
     bulkIncludeAttachments.checked = true;
     bulkIncludeAttachments.disabled = true;
@@ -756,10 +783,14 @@ bulkMediaToggle?.addEventListener("click", () => {
 });
 
 export const syncProgressSection = el("syncProgressSection");
-export const syncProgressLabel = el("syncProgressLabel");
-export const syncProgressPercent = el("syncProgressPercent");
-export const syncProgressBar = el("syncProgressBar");
+export const syncProgressCount = el("syncProgressCount");
+export const syncProgressList = el("syncProgressList");
+export const syncProgressToggle = el("syncProgressToggle");
 export const syncAbortBtn = el("syncAbortBtn");
+
+syncProgressToggle?.addEventListener("click", () => {
+  setSyncProgressCollapsed(syncProgressSection?.dataset.collapsed !== "true");
+});
 
 export const state = {
   bulkRows: [],
@@ -1180,6 +1211,7 @@ export function setBulkMediaCollapsed(collapsed) {
   bulkMediaProgress.dataset.collapsed = collapsed ? "true" : "false";
   bulkMediaToggle?.setAttribute("aria-expanded", String(!collapsed));
   refreshBulkMediaRowVisibility();
+  if (!collapsed) smoothScrollToBottom();
 }
 
 function refreshBulkMediaRowVisibility() {
@@ -1192,6 +1224,7 @@ function refreshBulkMediaRowVisibility() {
   }
   const active =
     rows.find((r) => r.dataset.state === "uploading") ||
+    rows.find((r) => r.dataset.state === "downloading") ||
     rows.find((r) => r.dataset.state === "pending") ||
     rows[rows.length - 1];
   rows.forEach((r) => (r.style.display = r === active ? "" : "none"));
@@ -1312,18 +1345,158 @@ export function hideBulkMediaProgress() {
   if (bulkMediaProgressList) bulkMediaProgressList.innerHTML = "";
 }
 
-export function updateSyncProgress(loaded, total, label) {
-  const pct =
-    total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0;
-  syncProgressBar.style.width = `${pct}%`;
-  syncProgressBar.dataset.done = String(loaded >= total && total > 0);
-  syncProgressPercent.textContent = `${pct}%`;
-  syncProgressSection.setAttribute("aria-valuenow", String(pct));
-  syncProgressLabel.textContent = label || "Uploading attachments…";
+const syncRows = [];
+
+function refreshSyncRowVisibility() {
+  if (!syncProgressList) return;
+  const collapsed = syncProgressSection?.dataset.collapsed === "true";
+  const rows = [...syncProgressList.children];
+  if (!collapsed) {
+    rows.forEach((r) => (r.style.display = ""));
+    return;
+  }
+  const active =
+    rows.find((r) => r.dataset.state === "uploading") ||
+    rows.find((r) => r.dataset.state === "downloading") ||
+    rows.find((r) => r.dataset.state === "pending") ||
+    rows[rows.length - 1];
+  rows.forEach((r) => (r.style.display = r === active ? "" : "none"));
 }
 
-export function setSyncProgressVisible(visible) {
-  syncProgressSection.style.display = visible ? "block" : "none";
+function setSyncProgressCollapsed(collapsed) {
+  if (!syncProgressSection) return;
+  syncProgressSection.dataset.collapsed = collapsed ? "true" : "false";
+  syncProgressToggle?.setAttribute("aria-expanded", String(!collapsed));
+  refreshSyncRowVisibility();
+  if (!collapsed) smoothScrollToBottom();
+}
+
+function updateSyncProgressHeader() {
+  if (syncProgressCount) {
+    const shown = syncRows.filter((r) => r.el);
+    syncProgressCount.textContent = shown.length
+      ? `${shown.length} attachment${shown.length === 1 ? "" : "s"}`
+      : "";
+  }
+}
+
+export function showSyncProgressSection() {
+  if (!syncProgressSection) return;
+  syncProgressSection.style.display = "block";
+}
+
+export function startSyncAttachmentProgress() {
+  syncRows.length = 0;
+  if (syncProgressList) syncProgressList.innerHTML = "";
+  syncAbortBtn.disabled = true;
+  syncAbortBtn.style.display = "";
+  updateSyncProgressHeader();
+  refreshSyncRowVisibility();
+}
+
+export function finishSyncProgress() {
+  if (!syncAbortBtn) return;
+  syncAbortBtn.disabled = true;
+  syncAbortBtn.style.display = "none";
+  if (syncProgressSection && !syncRows.some((r) => r.el)) {
+    syncProgressSection.style.display = "none";
+  }
+}
+
+export function addSyncAttachmentProgressRow(item) {
+  if (!syncProgressList) return -1;
+  const row = document.createElement("div");
+  row.className = "bulk-media-row";
+  row.dataset.state = "pending";
+
+  const head = document.createElement("div");
+  head.className = "bulk-media-row-head";
+
+  const labelEl = document.createElement("span");
+  labelEl.className = "bulk-media-row-label";
+  labelEl.textContent = item.label || "attachment";
+
+  const pctEl = document.createElement("span");
+  pctEl.className = "bulk-media-row-pct";
+  pctEl.textContent = "0%";
+
+  head.append(labelEl, pctEl);
+
+  const track = document.createElement("div");
+  track.className = "bulk-media-row-track";
+  const bar = document.createElement("div");
+  bar.className = "bulk-media-row-bar";
+  track.appendChild(bar);
+
+  const hint = document.createElement("div");
+  hint.className = "bulk-media-row-files";
+  hint.textContent = item.hint || "";
+
+  row.append(head, track, hint);
+  syncProgressList.appendChild(row);
+
+  syncRows.push({
+    el: row,
+    pctEl,
+    bar,
+    hint,
+    loaded: 0,
+    total: Number(item.size) || 0,
+    state: "pending",
+  });
+  updateSyncProgressHeader();
+  return syncRows.length - 1;
+}
+
+export function setSyncAttachmentProgress(index, loaded, total) {
+  const row = syncRows[index];
+  if (!row || !row.el) return;
+  showSyncProgressSection();
+  const becameActive =
+    row.state !== "uploading" && row.state !== "downloading";
+  if (row.state !== "downloading") {
+    row.state = "uploading";
+    row.el.dataset.state = "uploading";
+  }
+  if (total > 0) row.total = total;
+  const cap = row.total > 0 ? row.total : loaded;
+  row.loaded = Math.max(row.loaded, Math.min(loaded, cap));
+  const pct =
+    row.total > 0 ? Math.min(100, Math.round((row.loaded / row.total) * 100)) : 0;
+  row.bar.style.width = `${pct}%`;
+  row.pctEl.textContent = `${pct}%`;
+  if (becameActive) row.el.scrollIntoView({ block: "nearest" });
+  updateSyncProgressHeader();
+  refreshSyncRowVisibility();
+}
+
+export function setSyncAttachmentState(index, state, message) {
+  const row = syncRows[index];
+  if (!row) return;
+  if (state === "skipped") {
+    row.state = "skipped";
+    if (row.el) row.el.remove();
+    row.el = null;
+    updateSyncProgressHeader();
+    refreshSyncRowVisibility();
+    return;
+  }
+  if (state === "done" || state === "failed") showSyncProgressSection();
+  row.state = state;
+  row.el.dataset.state = state;
+  if (state === "downloading" || state === "uploading") {
+    row.el.scrollIntoView({ block: "nearest" });
+  }
+  if (state === "uploading") row.bar.style.width = "100%";
+  if (state === "done" || state === "failed" || state === "skipped") {
+    row.bar.style.width = "100%";
+    row.pctEl.textContent =
+      state === "done" ? "100%" : state === "failed" ? "failed" : "skipped";
+    if (state === "done") row.loaded = row.total;
+  }
+  if (message) row.hint.textContent = message;
+  updateSyncProgressHeader();
+  refreshSyncRowVisibility();
 }
 
 export function renderTicketCard(issueKey, issueUrl) {
@@ -1357,8 +1530,10 @@ export function renderTicketCard(issueKey, issueUrl) {
   updateAttachmentIncludeSyncState();
 }
 
-export function showLoginButton(url) {
+export function showLoginButton(url, label = "Log in to Jira") {
   const btn = bulkView.hidden ? loginBtn : bulkLoginBtn;
+  const labelEl = btn.querySelector(".btn-label");
+  if (labelEl) labelEl.textContent = label;
   btn.style.display = "block";
   btn.onclick = () => {
     chrome.tabs.create({ url });
