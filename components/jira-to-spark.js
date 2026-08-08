@@ -463,31 +463,35 @@ export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sy
       };
     };
     const existing = new Map();
+    let knownCount = 0;
     for (const name of knownSparkNames || []) {
       existing.set(String(name), null);
+      knownCount++;
     }
-    try {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id, allFrames: true },
-        func: listSparkAttachmentItemsInPage,
-        args: [sysId],
-        world: "MAIN",
-      });
-      const items =
-        (results || [])
-          .map((r) => r.result)
-          .filter((g) => Array.isArray(g) && g.length > 0)
-          .sort(
-            (a, b) =>
-              (b[0]?.items?.length || 0) - (a[0]?.items?.length || 0),
-          )[0]?.[0]?.items || [];
-      for (const item of items) existing.set(item.name, item.sizeBytes ?? null);
-      if (!items.length && !(knownSparkNames && knownSparkNames.length)) {
-        console.warn(
-          "[joshub] Spark attachment listing returned empty — dedupe unavailable, all Jira attachments will be (re)uploaded.",
-        );
-      }
-    } catch {}
+    if (knownCount === 0) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: activeTab.id, allFrames: true },
+          func: listSparkAttachmentItemsInPage,
+          args: [sysId],
+          world: "MAIN",
+        });
+        const items =
+          (results || [])
+            .map((r) => r.result)
+            .filter((g) => Array.isArray(g) && g.length > 0)
+            .sort(
+              (a, b) =>
+                (b[0]?.items?.length || 0) - (a[0]?.items?.length || 0),
+            )[0]?.[0]?.items || [];
+        for (const item of items) existing.set(item.name, item.sizeBytes ?? null);
+        if (!items.length) {
+          console.warn(
+            "[joshub] Spark attachment listing returned empty — dedupe unavailable, all Jira attachments will be (re)uploaded.",
+          );
+        }
+      } catch {}
+    }
     const outcomes = new Array(files.length);
     let nextIndex = 0;
     let completed = 0;

@@ -1940,6 +1940,16 @@ function listSparkAttachmentItemsInPage(sysId) {
     const items = [];
     if (!id) return [{ id, items, loginRequired: false }];
     if (loginRequired()) return [{ id, items, loginRequired: true }];
+    const listLockKey = "__jiraSparkAttachmentListLock__";
+    let acquired = false;
+    try {
+      const top = window.top || window;
+      if (top[listLockKey]) {
+        return [];
+      }
+      top[listLockKey] = true;
+      acquired = true;
+    } catch {}
     let apiFailed = false;
     let loginRequiredFlag = false;
     try {
@@ -1966,6 +1976,11 @@ function listSparkAttachmentItemsInPage(sysId) {
       }
     } catch {
       apiFailed = true;
+    }
+    if (acquired) {
+      try {
+        if (window.top) window.top[listLockKey] = false;
+      } catch {}
     }
     if (apiFailed && !loginRequiredFlag) {
       for (const el of document.querySelectorAll('a[href*="/api/now/attachment/"], a[href*="sys_attachment.do"]')) {
@@ -2015,11 +2030,10 @@ function uploadSparkAttachmentsInPage({ sysId, files }) {
     try {
       const top = window.top;
       if (!top) return true;
-      const held = top[syncLockKey];
-      if (typeof held === "number" && Date.now() - held < 120000) {
+      if (top[syncLockKey]) {
         return false;
       }
-      top[syncLockKey] = Date.now();
+      top[syncLockKey] = true;
       return true;
     } catch {
       return true;
@@ -2027,7 +2041,7 @@ function uploadSparkAttachmentsInPage({ sysId, files }) {
   };
   const releaseSyncLock = () => {
     try {
-      if (window.top) window.top[syncLockKey] = 0;
+      if (window.top) window.top[syncLockKey] = false;
     } catch {}
   };
 
@@ -2126,11 +2140,10 @@ function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
     try {
       const top = window.top;
       if (!top) return true;
-      const held = top[syncLockKey];
-      if (typeof held === "number" && Date.now() - held < 120000) {
+      if (top[syncLockKey]) {
         return false;
       }
-      top[syncLockKey] = Date.now();
+      top[syncLockKey] = true;
       return true;
     } catch {
       return true;
@@ -2138,7 +2151,7 @@ function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
   };
   const releaseSyncLock = () => {
     try {
-      if (window.top) window.top[syncLockKey] = 0;
+      if (window.top) window.top[syncLockKey] = false;
     } catch {}
   };
 
@@ -2752,11 +2765,10 @@ function postJiraCommentsInOriginPage({ sysId, comments, mappedIds }) {
     try {
       const top = window.top;
       if (!top) return true;
-      const held = top[syncLockKey];
-      if (typeof held === "number" && Date.now() - held < 120000) {
+      if (top[syncLockKey]) {
         return false;
       }
-      top[syncLockKey] = Date.now();
+      top[syncLockKey] = true;
       return true;
     } catch {
       return true;
@@ -2764,7 +2776,7 @@ function postJiraCommentsInOriginPage({ sysId, comments, mappedIds }) {
   };
   const releaseSyncLock = () => {
     try {
-      if (window.top) window.top[syncLockKey] = 0;
+      if (window.top) window.top[syncLockKey] = false;
     } catch {}
   };
 

@@ -102,7 +102,7 @@ import {
   listIssueAttachments,
 } from "./components/api.js";
 import { extractSourceUrl } from "./components/adf.js";
-import { createTicket } from "./components/single-ticket.js";
+import { createTicket, setSparkToJiraLookupCache } from "./components/single-ticket.js";
 import {
   runBulkImport,
   runListingImport,
@@ -419,6 +419,12 @@ includeAttachmentsInput.addEventListener("change", async () => {
           pageData.title,
           pageData.url,
         );
+        setSparkToJiraLookupCache({
+          jiraOrigin: ctx.jiraOrigin,
+          projectKey: ctx.projectKey,
+          url: pageData.url,
+          existing: found,
+        });
         if (found.issue) {
           foundTicket = true;
           try {
@@ -427,6 +433,13 @@ includeAttachmentsInput.addEventListener("change", async () => {
               found.issue.key,
             );
             jiraItems = combined.attachments;
+            setSparkToJiraLookupCache({
+              jiraOrigin: ctx.jiraOrigin,
+              projectKey: ctx.projectKey,
+              url: pageData.url,
+              existing: found,
+              combined,
+            });
           } catch {
             jiraItems = [];
           }

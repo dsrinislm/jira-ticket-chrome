@@ -48,6 +48,20 @@ import {
   dataUrlSize,
 } from "./attachments.js";
 
+let sparkToJiraLookupCache = null;
+
+export function setSparkToJiraLookupCache({ jiraOrigin, projectKey, url, existing, combined }) {
+  sparkToJiraLookupCache = { jiraOrigin, projectKey, url, existing, combined };
+}
+
+function matchSparkToJiraLookupCache(jiraOrigin, projectKey, url) {
+  const c = sparkToJiraLookupCache;
+  if (!c) return null;
+  if (c.jiraOrigin !== jiraOrigin || c.projectKey !== projectKey) return null;
+  if (c.url !== url) return null;
+  return c;
+}
+
 async function syncSparkCommentsForTicket(jiraOrigin, issueKey, pageData, existingBodies) {
   if (getSourceSite() !== "Spark" || !issueKey || !pageData?.url) {
     return { added: 0, total: 0 };
@@ -153,12 +167,28 @@ export async function createTicket() {
 
     setStatus("Checking for an existing ticket...", "loading");
 
-    const existing = await findExistingJiraIssueFor(
+    const lookup = matchSparkToJiraLookupCache(
       jiraOrigin,
       projectKey,
-      finalSummary,
       pageData.url,
     );
+    const existing = lookup
+      ? lookup.existing
+      : await findExistingJiraIssueFor(
+          jiraOrigin,
+          projectKey,
+          finalSummary,
+          pageData.url,
+        );
+
+    if (!lookup) {
+      setSparkToJiraLookupCache({
+        jiraOrigin,
+        projectKey,
+        url: pageData.url,
+        existing,
+      });
+    }
 
     if (existing.error) {
       setStatus("Couldn't check for an existing ticket. Try again.", "error");
@@ -172,22 +202,44 @@ export async function createTicket() {
       let finalStatusType = "success";
       let jiraAttachments = [];
 
-      if (includeAttachments && pageData.images?.length) {
+      if (includeAttachments) {
         setStatus(
           `Checking ${existing.issue.key} attachments...`,
           "loading",
         );
-        let missing = pageData.images;
-        let existingNames = new Set();
         try {
-          const combined = await getJiraIssueWithAttachments(
-            jiraOrigin,
-            existing.issue.key,
-          );
+          const cachedCombined =
+            lookup?.combined &&
+            lookup.existing?.issue?.key === existing.issue.key
+              ? lookup.combined
+              : null;
+          const combined =
+            cachedCombined ||
+            (await getJiraIssueWithAttachments(
+              jiraOrigin,
+              existing.issue.key,
+            ));
+          if (!cachedCombined) {
+            setSparkToJiraLookupCache({
+              jiraOrigin,
+              projectKey,
+              url: pageData.url,
+              existing,
+              combined,
+            });
+          }
           jiraAttachments = combined.attachments;
-          existingNames = new Map(
-            combined.attachments.map((a) => [a.name, Number(a.size) || null]),
-          );
+        } catch {
+
+        }
+      }
+
+      if (includeAttachments && pageData.images?.length) {
+        let missing = pageData.images;
+        const existingNames = new Map(
+          jiraAttachments.map((a) => [a.name, Number(a.size) || null]),
+        );
+        try {
           missing = pageData.images.filter((img) => {
             const name = imageUploadFilename(img);
             if (!existingNames.has(name)) return true;
@@ -282,9 +334,14 @@ export async function createTicket() {
         const selected = new Set(
           Array.isArray(selectedAttachments) ? selectedAttachments : [],
         );
-        const jiraToSpark = selected.size
-          ? jiraAttachments.filter((j) => selected.has(j.name))
-          : jiraAttachments;
+        const knownAtPicker = new Set(
+          (lookup?.combined?.attachments || []).map((a) => a.name),
+        );
+        const jiraToSpark = jiraAttachments.filter((j) => {
+          if (selected.size === 0) return true;
+          if (selected.has(j.name)) return true;
+          return !knownAtPicker.has(j.name);
+        });
         if (jiraToSpark.length) {
           try {
             setStatus(
@@ -475,6 +532,7 @@ export async function createTicket() {
   } catch (error) {
     setStatus(error.message || "Failed to create ticket.", "error");
   } finally {
+    sparkToJiraLookupCache = null;
     finishSyncProgress();
     setBusy(false);
     revealStatus();
