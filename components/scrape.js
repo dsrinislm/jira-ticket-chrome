@@ -2032,9 +2032,6 @@ function uploadSparkAttachmentsInPage({ sysId, files }) {
   };
 
   return (async () => {
-    if (!/incident\.do/.test(location.href)) {
-      return { uploaded: [], failed: [], errors: {}, skipped: true };
-    }
     if (!acquireSyncLock()) {
       return { uploaded: [], failed: [], errors: {}, skipped: true };
     }

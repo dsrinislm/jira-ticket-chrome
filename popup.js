@@ -121,6 +121,7 @@ const debouncedSaveSettings = debounce(saveSettings, 300);
 
 let jiraFlowActive = false;
 let detectionLocked = false;
+let cachedJiraSyncData = null;
 
 loadInitialState();
 startGapArt();
@@ -233,7 +234,16 @@ async function runSyncUpdates() {
         selectedAttachments: getIncludeAttachments()
           ? getSelectedAttachments()
           : null,
+        cachedJiraData: cachedJiraSyncData,
       });
+    if (cachedJiraSyncData && Array.isArray(attachmentsToSpark?.uploadedNames)) {
+      cachedJiraSyncData.syncedNames = [
+        ...new Set([
+          ...(cachedJiraSyncData.syncedNames || []),
+          ...attachmentsToSpark.uploadedNames,
+        ]),
+      ];
+    }
     const via = String(report.mode || "").startsWith("spark tab")
       ? " (via Spark tab)"
       : "";
@@ -348,11 +358,12 @@ includeAttachmentsInput.addEventListener("change", async () => {
         clearAttachmentPicker();
         return;
       }
-      const { items, syncedNames, loginRequired, sparkOrigin } =
+      const { items, syncedNames, loginRequired, sparkOrigin, issue: pickedIssue, attachments } =
         await getSyncAttachmentItems({
           jiraOrigin: ctx.jiraOrigin,
           issueKey: issue.key,
         });
+      cachedJiraSyncData = { issue: pickedIssue, attachments, syncedNames };
       if (!getIncludeAttachments()) return;
       if (loginRequired) {
         setSyncedTicketFound(false);

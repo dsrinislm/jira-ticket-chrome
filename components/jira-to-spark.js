@@ -133,11 +133,17 @@ function waitForTabComplete(tabId, timeoutMs = 20000) {
   });
 }
 
-async function useSparkTab({ sparkOrigin, sysId }, fn) {
+async function useSparkTab({ sparkOrigin, sysId, requireTicket = true }, fn) {
   const sourceUrl = `${sparkOrigin}/incident.do?sys_id=${encodeURIComponent(sysId)}`;
-  let tab = (await chrome.tabs.query({ url: `${sparkOrigin}/*` })).find((t) =>
-    (t.url || "").includes(sysId),
-  );
+  let tab = null;
+  if (!requireTicket) {
+    const tabs = await chrome.tabs.query({ url: `${sparkOrigin}/*` });
+    tab = tabs[0] || null;
+  } else {
+    tab = (await chrome.tabs.query({ url: `${sparkOrigin}/*` })).find((t) =>
+      (t.url || "").includes(sysId),
+    );
+  }
   let created = false;
   if (!tab) {
     tab = await chrome.tabs.create({ url: sourceUrl, active: false });
@@ -223,7 +229,31 @@ async function runInSparkTab({ sparkOrigin, sysId, comments, mappedIds, tab }) {
     return { ...report, mode: created ? "spark tab (opened)" : "spark tab" };
   };
 
-  if (tab) return execute(tab, false);
+  if (tab) {
+    let isTicket = false;
+    try {
+      isTicket = ((await chrome.tabs.get(tab.id))?.url || "").includes(sysId);
+    } catch {}
+    if (!isTicket) {
+      if (!comments || comments.length === 0) {
+        return {
+          posted: 0,
+          failed: 0,
+          skipped: 0,
+          total: 0,
+          hasFields: false,
+          url: "",
+          loginWall: false,
+          detail: "",
+          debug: "",
+          mapping: [],
+          mode: "spark tab",
+        };
+      }
+      return useSparkTab({ sparkOrigin, sysId }, (t) => execute(t, true));
+    }
+    return execute(tab, false);
+  }
   return useSparkTab({ sparkOrigin, sysId }, (t) => execute(t, true));
 }
 
@@ -314,7 +344,7 @@ async function fetchSparkEntriesInOrigin({ sparkOrigin, sysId, tab }) {
     )[0]?.[0]?.comments || [];
   };
   if (tab) return run(tab);
-  return useSparkTab({ sparkOrigin, sysId }, run);
+  return useSparkTab({ sparkOrigin, sysId, requireTicket: false }, run);
 }
 
 async function fetchSparkAttachmentsInOrigin({ sparkOrigin, sysId, tab }) {
@@ -336,7 +366,7 @@ async function fetchSparkAttachmentsInOrigin({ sparkOrigin, sysId, tab }) {
     );
   };
   if (tab) return run(tab);
-  return useSparkTab({ sparkOrigin, sysId }, run);
+  return useSparkTab({ sparkOrigin, sysId, requireTicket: false }, run);
 }
 
 async function fetchSparkAttachmentItemsInOrigin({ sparkOrigin, sysId, tab }) {
@@ -353,8 +383,7 @@ async function fetchSparkAttachmentItemsInOrigin({ sparkOrigin, sysId, tab }) {
       func: listSparkAttachmentItemsInPage,
       args: [sysId],
       world: "MAIN",
-    });
-    const groups = (results || []).map((r) => r.result);
+    });    const groups = (results || []).map((r) => r.result);
     const outs = groups
       .filter((g) => Array.isArray(g) && g.length > 0);
     let loginRequired = false;
@@ -372,10 +401,10 @@ async function fetchSparkAttachmentItemsInOrigin({ sparkOrigin, sysId, tab }) {
     return { items, loginRequired };
   };
   if (tab) return run(tab);
-  return useSparkTab({ sparkOrigin, sysId }, run);
+  return useSparkTab({ sparkOrigin, sysId, requireTicket: false }, run);
 }
 
-export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sysId, files, tab, onProgress, onFileProgress, onFileState }) {
+export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sysId, files, tab, onProgress, onFileProgress, onFileState, knownSparkNames }) {
   const run = async (activeTab) => {
     const executeUpload = async (file, dataUrl) => {
       const results = await chrome.scripting.executeScript({
@@ -398,6 +427,9 @@ export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sy
       };
     };
     const existing = new Map();
+    for (const name of knownSparkNames || []) {
+      existing.set(String(name), null);
+    }
     try {
       const results = await chrome.scripting.executeScript({
         target: { tabId: activeTab.id, allFrames: true },
@@ -414,6 +446,11 @@ export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sy
               (b[0]?.items?.length || 0) - (a[0]?.items?.length || 0),
           )[0]?.[0]?.items || [];
       for (const item of items) existing.set(item.name, item.sizeBytes ?? null);
+      if (!items.length && !(knownSparkNames && knownSparkNames.length)) {
+        console.warn(
+          "[joshub] Spark attachment listing returned empty — dedupe unavailable, all Jira attachments will be (re)uploaded.",
+        );
+      }
     } catch {}
     const outcomes = new Array(files.length);
     let nextIndex = 0;
@@ -538,7 +575,7 @@ export async function syncSparkAttachmentsInOrigin({ jiraOrigin, sparkOrigin, sy
     };
   };
   if (tab) return run(tab);
-  return useSparkTab({ sparkOrigin, sysId }, run);
+  return useSparkTab({ sparkOrigin, sysId, requireTicket: false }, run);
 }
 
 function parseSourceUrl(sourceUrl) {
@@ -562,8 +599,7 @@ export async function getSyncAttachmentItems({ jiraOrigin, issueKey }) {
     jiraOrigin,
     issueKey,
   );
-  const sourceUrl = extractSourceUrl(issue?.fields?.description);
-  if (!sourceUrl) {
+  const sourceUrl = extractSourceUrl(issue?.fields?.description);  if (!sourceUrl) {
     return { items: [], syncedNames: new Set() };
   }
   const { sparkOrigin, sysId } = parseSourceUrl(sourceUrl);
@@ -619,7 +655,7 @@ export async function getSyncAttachmentItems({ jiraOrigin, issueKey }) {
   const syncedNames = new Set(
     items.filter((i) => i.inJira).map((i) => i.name),
   );
-  return { items, syncedNames, loginRequired, sparkOrigin };
+  return { items, syncedNames, loginRequired, sparkOrigin, issue, attachments };
 }
 
 export async function syncJiraUpdates({
@@ -627,11 +663,17 @@ export async function syncJiraUpdates({
   issueKey,
   includeAttachments = true,
   selectedAttachments,
+  cachedJiraData,
 }) {
   let issue;
   let jiraItems = [];
+  let knownSparkNames = [];
 
-  if (includeAttachments) {
+  if (includeAttachments && cachedJiraData?.attachments) {
+    issue = cachedJiraData.issue;
+    jiraItems = cachedJiraData.attachments;
+    knownSparkNames = cachedJiraData.syncedNames || [];
+  } else if (includeAttachments) {
     const combined = await getJiraIssueWithAttachments(
       jiraOrigin,
       issueKey,
@@ -653,7 +695,7 @@ export async function syncJiraUpdates({
     Array.isArray(selectedAttachments) ? selectedAttachments : [],
   );
 
-  return useSparkTab({ sparkOrigin, sysId }, async (tab) => {
+  return useSparkTab({ sparkOrigin, sysId, requireTicket: false }, async (tab) => {
     const jiraComments = await listJiraCommentsDetailed(jiraOrigin, issueKey);
     const sparkEntries = await fetchSparkEntriesInOrigin({ sparkOrigin, sysId, tab });
     const sparkToJira = await syncSparkComments(
@@ -739,6 +781,7 @@ export async function syncJiraUpdates({
             sysId,
             files: jiraToSync,
             tab,
+            knownSparkNames,
             onFileProgress: (index, loaded, total) =>
               setSyncAttachmentProgress(offset + index, loaded, total),
             onFileState: (index, state, message) =>
