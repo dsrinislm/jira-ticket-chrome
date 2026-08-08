@@ -36,3 +36,42 @@ export async function addCommentMappings(sparkSysId, pairs) {
   }
   await writeMap(map);
 }
+
+const OCTANE_STORAGE_KEY = "jiraOctaneCommentMap";
+
+async function readOctaneMap() {
+  const data = await chrome.storage.local.get(OCTANE_STORAGE_KEY);
+  return data[OCTANE_STORAGE_KEY] || {};
+}
+
+async function writeOctaneMap(map) {
+  await chrome.storage.local.set({ [OCTANE_STORAGE_KEY]: map });
+}
+
+export async function getMappedOctaneCommentIds(workItemId) {
+  const map = await readOctaneMap();
+  const entry = map[String(workItemId)];
+  return entry ? new Set(Object.keys(entry)) : new Set();
+}
+
+export async function isEntryFromJiraOctane(workItemId, octaneCommentId) {
+  if (!workItemId || !octaneCommentId) return false;
+  const map = await readOctaneMap();
+  const entry = map[String(workItemId)];
+  if (!entry) return false;
+  return Object.values(entry).includes(String(octaneCommentId));
+}
+
+export async function addOctaneCommentMappings(workItemId, pairs) {
+  if (!workItemId || !Array.isArray(pairs) || !pairs.length) return;
+  const map = await readOctaneMap();
+  if (!map[String(workItemId)]) map[String(workItemId)] = {};
+  for (const pair of pairs) {
+    if (pair?.jiraCommentId && pair?.octaneCommentId) {
+      map[String(workItemId)][String(pair.jiraCommentId)] = String(
+        pair.octaneCommentId,
+      );
+    }
+  }
+  await writeOctaneMap(map);
+}

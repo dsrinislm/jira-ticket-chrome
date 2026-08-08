@@ -593,6 +593,10 @@ async function getJiraIssueWithAttachments(jiraBaseUrl, issueKey) {
 }
 
 async function addJiraComment(jiraBaseUrl, issueKey, body) {
+  const payload =
+    body && typeof body === "object" && body.type === "doc"
+      ? body
+      : textToAdf(body);
   const response = await jiraFetch(
     jiraBaseUrl,
     `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`,
@@ -602,7 +606,7 @@ async function addJiraComment(jiraBaseUrl, issueKey, body) {
         "Content-Type": "application/json",
         "X-Atlassian-Token": "no-check",
       },
-      body: JSON.stringify({ body: textToAdf(body) }),
+      body: JSON.stringify({ body: payload }),
     },
     { retryStatus: false },
   );

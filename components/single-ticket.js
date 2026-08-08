@@ -23,6 +23,7 @@ import {
   getPageData,
   detectSiteInTab,
   fetchSparkCommentsInTab,
+  fetchOctaneCommentsInTab,
   getCurrentTab,
 } from "./scrape.js";
 import {
@@ -31,6 +32,10 @@ import {
   syncSparkAttachmentsInOrigin,
 } from "./jira-to-spark.js";
 import {
+  syncJiraCommentsToOctane,
+  syncOctaneAttachmentsInOrigin,
+} from "./jira-to-octane.js";
+import {
   isJiraLoggedIn,
   validateProject,
   findExistingJiraIssueFor,
@@ -38,7 +43,7 @@ import {
   getJiraIssueWithAttachments,
   listJiraCommentsDetailed,
 } from "./api.js";
-import { syncSparkComments } from "./comments.js";
+import { syncSourceComments } from "./comments.js";
 import { sourceUrlBlock } from "./adf.js";
 import {
   imageUploadFilename,
@@ -62,23 +67,46 @@ function matchSparkToJiraLookupCache(jiraOrigin, projectKey, url) {
   return c;
 }
 
-async function syncSparkCommentsForTicket(jiraOrigin, issueKey, pageData, existingBodies) {
-  if (getSourceSite() !== "Spark" || !issueKey || !pageData?.url) {
+async function syncSourceCommentsForTicket(jiraOrigin, issueKey, pageData, existingBodies) {
+  if (!issueKey || !pageData?.url) {
     return { added: 0, total: 0 };
   }
-  const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(pageData.url || "");
-  if (!sysIdMatch) return { added: 0, total: 0 };
-  const groups = await fetchSparkCommentsInTab([sysIdMatch[1]]).catch(() => {
-    return [];
-  });
-  const entries = groups[0]?.comments || [];
-  return syncSparkComments(
-    jiraOrigin,
-    issueKey,
-    entries,
-    sysIdMatch[1],
-    existingBodies,
-  );
+  const site = getSourceSite();
+  if (site === "Spark") {
+    const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(pageData.url || "");
+    if (!sysIdMatch) return { added: 0, total: 0 };
+    const groups = await fetchSparkCommentsInTab([sysIdMatch[1]]).catch(() => {
+      return [];
+    });
+    const entries = groups[0]?.comments || [];
+    return syncSourceComments(
+      "Spark",
+      jiraOrigin,
+      issueKey,
+      entries,
+      sysIdMatch[1],
+      existingBodies,
+    );
+  }
+  if (site === "Octane") {
+    const idMatch =
+      /entityType=work_item&id=(\d+)/.exec(pageData.url || "") ||
+      /[?&]id=(\d+)/.exec(pageData.url.split("#")[0] || "");
+    if (!idMatch) return { added: 0, total: 0 };
+    const groups = await fetchOctaneCommentsInTab([idMatch[1]]).catch(() => {
+      return [];
+    });
+    const entries = groups[0]?.comments || [];
+    return syncSourceComments(
+      "Octane",
+      jiraOrigin,
+      issueKey,
+      entries,
+      idMatch[1],
+      existingBodies,
+    );
+  }
+  return { added: 0, total: 0 };
 }
 
 export async function createTicket() {
@@ -337,20 +365,17 @@ export async function createTicket() {
         const knownAtPicker = new Set(
           (lookup?.combined?.attachments || []).map((a) => a.name),
         );
-        const jiraToSpark = jiraAttachments.filter((j) => {
+        const jiraToSource = jiraAttachments.filter((j) => {
           if (selected.size === 0) return true;
           if (selected.has(j.name)) return true;
           return !knownAtPicker.has(j.name);
         });
-        if (jiraToSpark.length) {
+        if (jiraToSource.length) {
+          const site = getSourceSite();
           try {
-            setStatus(
-              `Syncing ${jiraToSpark.length} Jira attachment(s) to Spark...`,
-              "loading",
-            );
             ensureSyncProgress();
             let jiraRowStart = -1;
-            jiraToSpark.forEach((item) => {
+            jiraToSource.forEach((item) => {
               const idx = addSyncAttachmentProgressRow({
                 label: item.name,
                 size: Number(item.size) || 0,
@@ -358,33 +383,66 @@ export async function createTicket() {
               });
               if (jiraRowStart < 0) jiraRowStart = idx;
             });
-            const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(pageData.url || "");
-            const currentTab = await getCurrentTab();
-            const sparkBack = await syncSparkAttachmentsInOrigin({
-              jiraOrigin,
-              sparkOrigin: new URL(pageData.url).origin,
-              sysId: sysIdMatch ? sysIdMatch[1] : "",
-              files: jiraToSpark,
-              tab: currentTab,
-              onFileProgress: (index, loaded, total) =>
-                setSyncAttachmentProgress(jiraRowStart + index, loaded, total),
-              onFileState: (index, state, message) =>
-                setSyncAttachmentState(jiraRowStart + index, state, message),
-            });
-            if (sparkBack.failed > 0) {
-              finalStatus = `${finalStatus} ${sparkBack.failed} attachment(s) failed to sync to Spark${failedAttachmentNames(sparkBack.failedNames)}.`;
-              finalStatusType = "error";
-            } else if (sparkBack.uploaded > 0) {
-              finalStatus = `${finalStatus} ${sparkBack.uploaded} Jira attachment(s) synced to Spark.`;
+            if (site === "Spark") {
+              setStatus(
+                `Syncing ${jiraToSource.length} Jira attachment(s) to Spark...`,
+                "loading",
+              );
+              const sysIdMatch = /[?&]sys_id=([^&]+)/.exec(pageData.url || "");
+              const currentTab = await getCurrentTab();
+              const sourceBack = await syncSparkAttachmentsInOrigin({
+                jiraOrigin,
+                sparkOrigin: new URL(pageData.url).origin,
+                sysId: sysIdMatch ? sysIdMatch[1] : "",
+                files: jiraToSource,
+                tab: currentTab,
+                onFileProgress: (index, loaded, total) =>
+                  setSyncAttachmentProgress(jiraRowStart + index, loaded, total),
+                onFileState: (index, state, message) =>
+                  setSyncAttachmentState(jiraRowStart + index, state, message),
+              });
+              if (sourceBack.failed > 0) {
+                finalStatus = `${finalStatus} ${sourceBack.failed} attachment(s) failed to sync to Spark${failedAttachmentNames(sourceBack.failedNames)}.`;
+                finalStatusType = "error";
+              } else if (sourceBack.uploaded > 0) {
+                finalStatus = `${finalStatus} ${sourceBack.uploaded} Jira attachment(s) synced to Spark.`;
+              }
+              const failedSet = new Set(sourceBack.failedNames || []);
+              markAttachmentsSynced(
+                jiraToSource
+                  .map((j) => j.name)
+                  .filter((n) => !failedSet.has(n)),
+              );
+            } else if (site === "Octane") {
+              setStatus(
+                `Syncing ${jiraToSource.length} Jira attachment(s) to Octane...`,
+                "loading",
+              );
+              const sourceBack = await syncOctaneAttachmentsInOrigin({
+                jiraOrigin,
+                sourceUrl: pageData.url,
+                files: jiraToSource,
+                onFileProgress: (index, loaded, total) =>
+                  setSyncAttachmentProgress(jiraRowStart + index, loaded, total),
+                onFileState: (index, state, message) =>
+                  setSyncAttachmentState(jiraRowStart + index, state, message),
+              });
+              if (sourceBack.failed > 0) {
+                finalStatus = `${finalStatus} ${sourceBack.failed} attachment(s) failed to sync to Octane${failedAttachmentNames(sourceBack.failedNames)}.`;
+                finalStatusType = "error";
+              } else if (sourceBack.uploaded > 0) {
+                finalStatus = `${finalStatus} ${sourceBack.uploaded} Jira attachment(s) synced to Octane.`;
+              }
+              const failedSet = new Set(sourceBack.failedNames || []);
+              markAttachmentsSynced(
+                jiraToSource
+                  .map((j) => j.name)
+                  .filter((n) => !failedSet.has(n)),
+              );
             }
-            const failedSet = new Set(sparkBack.failedNames || []);
-            markAttachmentsSynced(
-              jiraToSpark
-                .map((j) => j.name)
-                .filter((n) => !failedSet.has(n)),
-            );
           } catch {
-            finalStatus = `${finalStatus} Couldn't sync Jira attachments to Spark.`;
+            const target = site === "Octane" ? "Octane" : "Spark";
+            finalStatus = `${finalStatus} Couldn't sync Jira attachments to ${target}.`;
           }
         }
       }
@@ -397,7 +455,7 @@ export async function createTicket() {
         );
       } catch {}
 
-      const commentSync = await syncSparkCommentsForTicket(
+      const commentSync = await syncSourceCommentsForTicket(
         jiraOrigin,
         existing.issue.key,
         pageData,
@@ -408,23 +466,44 @@ export async function createTicket() {
       }
 
       let backSyncText = "";
-      try {
-        setStatus(
-          `Syncing ${existing.issue.key} comments back to Spark...`,
-          "loading",
-        );
-        const { report } = await syncJiraCommentsToSpark({
-          jiraOrigin,
-          issueKey: existing.issue.key,
-          comments: jiraComments,
-          sourceUrl: pageData.url,
-        });
-        if (report.posted > 0) {
-          backSyncText = ` ${report.posted} Jira comment(s) synced back to Spark.`;
-        } else if (report.failed > 0) {
-          backSyncText = ` ${report.failed} Jira comment(s) failed to sync back to Spark.`;
-        }
-      } catch {}
+      const site = getSourceSite();
+      if (site === "Spark") {
+        try {
+          setStatus(
+            `Syncing ${existing.issue.key} comments back to Spark...`,
+            "loading",
+          );
+          const { report } = await syncJiraCommentsToSpark({
+            jiraOrigin,
+            issueKey: existing.issue.key,
+            comments: jiraComments,
+            sourceUrl: pageData.url,
+          });
+          if (report.posted > 0) {
+            backSyncText = ` ${report.posted} Jira comment(s) synced back to Spark.`;
+          } else if (report.failed > 0) {
+            backSyncText = ` ${report.failed} Jira comment(s) failed to sync back to Spark.`;
+          }
+        } catch {}
+      } else if (site === "Octane") {
+        try {
+          setStatus(
+            `Syncing ${existing.issue.key} comments back to Octane...`,
+            "loading",
+          );
+          const { report } = await syncJiraCommentsToOctane({
+            jiraOrigin,
+            issueKey: existing.issue.key,
+            comments: jiraComments,
+            sourceUrl: pageData.url,
+          });
+          if (report.posted > 0) {
+            backSyncText = ` ${report.posted} Jira comment(s) synced back to Octane.`;
+          } else if (report.failed > 0) {
+            backSyncText = ` ${report.failed} Jira comment(s) failed to sync back to Octane.`;
+          }
+        } catch {}
+      }
 
       setStatus(`${finalStatus}${backSyncText}`, finalStatusType);
       renderTicketCard(existing.issue.key, issueUrl);
@@ -501,7 +580,7 @@ export async function createTicket() {
 
     const issueUrl = `${jiraOrigin}/browse/${issue.key}`;
 
-    const commentSync = await syncSparkCommentsForTicket(
+    const commentSync = await syncSourceCommentsForTicket(
       jiraOrigin,
       issue.key,
       capturedData,

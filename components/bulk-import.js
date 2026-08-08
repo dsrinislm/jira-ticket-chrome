@@ -38,15 +38,24 @@ import {
   scrapeSelectedSparkListingInTab,
   fetchListingDetailsInTab,
   fetchSparkCommentsInTab,
+  fetchOctaneCommentsInTab,
 } from "./scrape.js";
-import { syncSparkComments } from "./comments.js";
-import { findExistingJiraIssueFor, createJiraIssue } from "./api.js";
+import { syncSourceComments } from "./comments.js";
+import {
+  findExistingJiraIssueFor,
+  createJiraIssue,
+  getJiraIssueWithAttachments,
+} from "./api.js";
 import { buildIssueDescription, sourceUrlBlock } from "./adf.js";
 import {
   attachImagesToIssue,
   uploadMissingAttachments,
   failedAttachmentNames,
 } from "./attachments.js";
+import {
+  syncJiraCommentsToOctane,
+  syncOctaneAttachmentsInOrigin,
+} from "./jira-to-octane.js";
 import { ensureJiraReady } from "./session.js";
 import { sleep } from "./util.js";
 
@@ -338,8 +347,18 @@ export async function runListingImport(site) {
             commentBySysId.set(String(group.id), group.comments);
           }
         });
-      } catch {
-}
+      } catch {}
+    } else if (flowSite === "Octane") {
+      try {
+        const groups = await fetchOctaneCommentsInTab(
+          items.map((i) => i.id),
+        );
+        groups.forEach((group) => {
+          if (group?.comments?.length) {
+            commentBySysId.set(String(group.id), group.comments);
+          }
+        });
+      } catch {}
     }
 
     const uploadedAttachments = {};
@@ -455,7 +474,8 @@ export async function runListingImport(site) {
 
           const comments = commentBySysId.get(String(items[index].id));
           if (comments?.length) {
-            const commentSync = await syncSparkComments(
+            const commentSync = await syncSourceComments(
+              flowSite,
               jiraOrigin,
               existing.issue.key,
               comments,
@@ -464,6 +484,42 @@ export async function runListingImport(site) {
             if (commentSync.added > 0) {
               statusHtml = `${statusHtml} — ${commentSync.added} comment(s) synced`;
             }
+          }
+
+          if (flowSite === "Octane") {
+            if (getBulkIncludeAttachments()) {
+              try {
+                const { attachments: jiraAttachments } =
+                  await getJiraIssueWithAttachments(
+                    jiraOrigin,
+                    existing.issue.key,
+                  );
+                if (jiraAttachments.length) {
+                  const octaneBack = await syncOctaneAttachmentsInOrigin({
+                    jiraOrigin,
+                    sourceUrl: detail.url || row.sourceUrl,
+                    files: jiraAttachments,
+                  });
+                  if (octaneBack.uploaded > 0) {
+                    statusHtml = `${statusHtml} — ${octaneBack.uploaded} Jira attachment(s) synced to Octane`;
+                  } else if (octaneBack.failed > 0) {
+                    statusHtml = `${statusHtml} — ${octaneBack.failed} Jira attachment(s) failed to sync to Octane${failedAttachmentNames(octaneBack.failedNames)}`;
+                  }
+                }
+              } catch {}
+            }
+            try {
+              const back = await syncJiraCommentsToOctane({
+                jiraOrigin,
+                issueKey: existing.issue.key,
+                sourceUrl: detail.url || row.sourceUrl,
+              });
+              if (back.report.posted > 0) {
+                statusHtml = `${statusHtml} — ${back.report.posted} Jira comment(s) synced back to Octane`;
+              } else if (back.report.failed > 0) {
+                statusHtml = `${statusHtml} — ${back.report.failed} Jira comment(s) failed to sync back to Octane`;
+              }
+            } catch {}
           }
 
           setRowStatus(row, "exists", statusHtml);
@@ -526,7 +582,8 @@ export async function runListingImport(site) {
             const comments = commentBySysId.get(String(items[index].id));
             let commentSync = { added: 0 };
             if (comments?.length) {
-              commentSync = await syncSparkComments(
+              commentSync = await syncSourceComments(
+                flowSite,
                 jiraOrigin,
                 issue.key,
                 comments,
