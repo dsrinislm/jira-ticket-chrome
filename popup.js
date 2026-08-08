@@ -98,7 +98,6 @@ import {
 import {
   findExistingJiraIssue,
   findExistingJiraIssueFor,
-  getJiraIssue,
   getJiraIssueWithAttachments,
   listIssueAttachments,
 } from "./components/api.js";
@@ -362,6 +361,7 @@ includeAttachmentsInput.addEventListener("change", async () => {
         await getSyncAttachmentItems({
           jiraOrigin: ctx.jiraOrigin,
           issueKey: issue.key,
+          cachedJiraData: cachedJiraSyncData,
         });
       cachedJiraSyncData = { issue: pickedIssue, attachments, syncedNames };
       if (!getIncludeAttachments()) return;
@@ -760,8 +760,22 @@ async function applyDetectedState() {
     onSyncFlow = true;
   } else if (jiraPage?.type === "ticket") {
     try {
-      const issue = await getJiraIssue(jiraPage.origin, jiraPage.key);
-      onSyncFlow = Boolean(extractSourceUrl(issue?.fields?.description));
+      const cached =
+        cachedJiraSyncData &&
+        cachedJiraSyncData.issue?.key === jiraPage.key &&
+        cachedJiraSyncData.issue?.self?.includes(jiraPage.origin)
+          ? cachedJiraSyncData
+          : null;
+      if (cached) {
+        onSyncFlow = Boolean(extractSourceUrl(cached.issue?.fields?.description));
+      } else {
+        const combined = await getJiraIssueWithAttachments(
+          jiraPage.origin,
+          jiraPage.key,
+        );
+        cachedJiraSyncData = { issue: combined.issue, attachments: combined.attachments, syncedNames: [] };
+        onSyncFlow = Boolean(extractSourceUrl(combined.issue?.fields?.description));
+      }
     } catch {
       onSyncFlow = false;
     }

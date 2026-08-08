@@ -8,6 +8,7 @@ import { extractSourceUrl } from "./adf.js";
 import {
   getCurrentTab,
   postJiraCommentsInSparkPage,
+  postJiraCommentsInOriginPage,
   fetchSparkCommentsInPage,
   fetchSparkAttachmentsInPage,
   listSparkAttachmentItemsInPage,
@@ -229,6 +230,18 @@ async function runInSparkTab({ sparkOrigin, sysId, comments, mappedIds, tab }) {
     return { ...report, mode: created ? "spark tab (opened)" : "spark tab" };
   };
 
+  const runApiOnly = async (activeTab) => {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: activeTab.id, allFrames: true },
+      func: postJiraCommentsInOriginPage,
+      args: [{ sysId, comments, mappedIds: [...mappedIds] }],
+      world: "MAIN",
+    });
+    return (results || [])
+      .map((r) => r.result)
+      .filter((r) => r && typeof r === "object");
+  };
+
   if (tab) {
     let isTicket = false;
     try {
@@ -250,6 +263,29 @@ async function runInSparkTab({ sparkOrigin, sysId, comments, mappedIds, tab }) {
           mode: "spark tab",
         };
       }
+      try {
+        const apiReports = await runApiOnly(tab);
+        const apiActive = apiReports.filter((r) => !r.skippedByLock);
+        const apiReport =
+          apiActive.find((r) => r.hasFields) ||
+          apiActive.sort((a, b) => (b.posted || 0) - (a.posted || 0))[0] ||
+          apiReports[0];
+        if (apiReport) {
+          if (apiReport.loginWall) {
+            return { ...apiReport, mode: "spark tab", debug: apiReport.detail };
+          }
+          if (apiReport.failed === 0) {
+            return {
+              ...apiReport,
+              mode: "spark tab",
+              debug: apiReports
+                .map((r) => r.detail)
+                .filter(Boolean)
+                .join(" | "),
+            };
+          }
+        }
+      } catch {}
       return useSparkTab({ sparkOrigin, sysId }, (t) => execute(t, true));
     }
     return execute(tab, false);
@@ -594,12 +630,25 @@ function parseSourceUrl(sourceUrl) {
   return { sparkOrigin, sysId };
 }
 
-export async function getSyncAttachmentItems({ jiraOrigin, issueKey }) {
-  const { issue, attachments } = await getJiraIssueWithAttachments(
-    jiraOrigin,
-    issueKey,
-  );
-  const sourceUrl = extractSourceUrl(issue?.fields?.description);  if (!sourceUrl) {
+export async function getSyncAttachmentItems({ jiraOrigin, issueKey, cachedJiraData }) {
+  let issue;
+  let attachments;
+  const cachedMatches =
+    cachedJiraData?.issue &&
+    cachedJiraData.attachments &&
+    cachedJiraData.issue?.key === issueKey &&
+    String(cachedJiraData.issue?.self || "").startsWith(jiraOrigin);
+  if (cachedMatches) {
+    issue = cachedJiraData.issue;
+    attachments = cachedJiraData.attachments;
+  } else {
+    ({ issue, attachments } = await getJiraIssueWithAttachments(
+      jiraOrigin,
+      issueKey,
+    ));
+  }
+  const sourceUrl = extractSourceUrl(issue?.fields?.description);
+  if (!sourceUrl) {
     return { items: [], syncedNames: new Set() };
   }
   const { sparkOrigin, sysId } = parseSourceUrl(sourceUrl);
@@ -669,7 +718,12 @@ export async function syncJiraUpdates({
   let jiraItems = [];
   let knownSparkNames = [];
 
-  if (includeAttachments && cachedJiraData?.attachments) {
+  const cachedMatches =
+    cachedJiraData?.issue &&
+    cachedJiraData.attachments &&
+    cachedJiraData.issue?.key === issueKey &&
+    String(cachedJiraData.issue?.self || "").startsWith(jiraOrigin);
+  if (includeAttachments && cachedMatches) {
     issue = cachedJiraData.issue;
     jiraItems = cachedJiraData.attachments;
     knownSparkNames = cachedJiraData.syncedNames || [];

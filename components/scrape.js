@@ -2721,6 +2721,256 @@ function postJiraCommentsInSparkPage({ sysId, comments, mappedIds }) {
   })();
 }
 
+function postJiraCommentsInOriginPage({ sysId, comments, mappedIds }) {
+  const id = String(sysId || "").trim();
+
+  const userToken =
+    (typeof window !== "undefined" && window.g_ck) ||
+    document.querySelector('meta[name="X-UserToken"]')?.content ||
+    document.querySelector('input[name="X-UserToken"]')?.value ||
+    "";
+  const headers = { Accept: "application/json" };
+  if (userToken) {
+    headers["X-UserToken"] = userToken;
+  } else {
+    headers["Authorization"] = `Basic ${btoa(`__joshub:${Date.now()}`)}`;
+  }
+  const jsonHeaders = { ...headers, "Content-Type": "application/json" };
+
+  const mappedIdSet = new Set(
+    Array.isArray(mappedIds)
+      ? mappedIds
+      : mappedIds && typeof mappedIds.has === "function"
+        ? Array.from(mappedIds)
+        : [],
+  );
+
+  const commentText = (c) => String(c.body || "").trim();
+
+  const syncLockKey = "__jiraSparkSyncPostingLock__";
+  const acquireSyncLock = () => {
+    try {
+      const top = window.top;
+      if (!top) return true;
+      const held = top[syncLockKey];
+      if (typeof held === "number" && Date.now() - held < 120000) {
+        return false;
+      }
+      top[syncLockKey] = Date.now();
+      return true;
+    } catch {
+      return true;
+    }
+  };
+  const releaseSyncLock = () => {
+    try {
+      if (window.top) window.top[syncLockKey] = 0;
+    } catch {}
+  };
+
+  const readJournal = async () => {
+    const entries = [];
+    try {
+      const response = await fetch(
+        `${location.origin}/api/now/table/sys_journal_field?sysparm_query=element_id=${encodeURIComponent(id)}^ORDERBYsys_created_on&sysparm_fields=element,value,sys_created_by,sys_created_on,sys_id&sysparm_display_value=true&sysparm_limit=1000`,
+        { credentials: "include", headers },
+      );
+      if (response.ok) {
+        const json = await response.json();
+        for (const row of Array.isArray(json?.result) ? json.result : []) {
+          const text = String(row?.value || "").trim();
+          const entryId = String(row?.sys_id || "").trim();
+          if (text && entryId) entries.push({ sysId: entryId, text });
+        }
+      }
+    } catch {}
+    return entries;
+  };
+
+  const postViaPatch = async (text) => {
+    try {
+      const response = await fetch(
+        `${location.origin}/api/now/table/incident/${encodeURIComponent(id)}`,
+        {
+          method: "PATCH",
+          credentials: "include",
+          headers: jsonHeaders,
+          body: JSON.stringify({ work_notes: text }),
+        },
+      );
+      return {
+        ok: response.ok,
+        status: response.status,
+        stage: response.ok ? "api:patch:ok" : `api:patch:error:${response.status}`,
+      };
+    } catch {
+      return { ok: false, status: 0, stage: "api:patch:throw" };
+    }
+  };
+
+  const postViaJournalTable = async (text) => {
+    try {
+      const response = await fetch(
+        `${location.origin}/api/now/table/sys_journal_field`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: jsonHeaders,
+          body: JSON.stringify({ element_id: id, element: "work_notes", value: text }),
+        },
+      );
+      return {
+        ok: response.ok,
+        status: response.status,
+        stage: response.ok ? "api:journal:ok" : `api:journal:error:${response.status}`,
+      };
+    } catch {
+      return { ok: false, status: 0, stage: "api:journal:throw" };
+    }
+  };
+
+  const postViaForm = async (text) => {
+    try {
+      const response = await fetch(
+        `${location.origin}/incident.do?sys_id=${encodeURIComponent(id)}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            ...headers,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          },
+          body: new URLSearchParams({ work_notes: text }).toString(),
+        },
+      );
+      if (!response.ok) {
+        return { ok: false, status: response.status, stage: `api:form:error:${response.status}` };
+      }
+      const html = await response.text();
+      return html.includes(text)
+        ? { ok: true, status: response.status, stage: "api:form:ok" }
+        : { ok: false, status: response.status, stage: "api:form:unconfirmed" };
+    } catch {
+      return { ok: false, status: 0, stage: "api:form:throw" };
+    }
+  };
+
+  const entryMatches = (entry, body) =>
+    entry.text === body ||
+    (body && body.length > 20 && entry.text.includes(body));
+
+  return (async () => {
+    if (!acquireSyncLock()) {
+      return {
+        posted: 0,
+        failed: 0,
+        skipped: comments.length,
+        total: comments.length,
+        hasFields: true,
+        wnFields: 1,
+        url: location.href,
+        loginWall: false,
+        skippedByLock: true,
+        detail: "skipped — another frame is handling the posting",
+        mapping: [],
+      };
+    }
+    try {
+      let journal = [];
+      try {
+        journal = await readJournal();
+      } catch {}
+      const existing = comments.filter((c) => {
+        const body = commentText(c);
+        return (
+          mappedIdSet.has(c.id) ||
+          journal.some((e) => entryMatches(e, body))
+        );
+      });
+      const pending = comments.filter((c) => !existing.includes(c));
+      const failedIds = new Set();
+      const stages = [];
+      let loginWall = false;
+      for (const c of pending) {
+        const text = commentText(c);
+        let res = await postViaPatch(text);
+        if (!res.ok) res = await postViaJournalTable(text);
+        if (!res.ok) res = await postViaForm(text);
+        if (res.status === 401) loginWall = true;
+        stages.push(res.stage);
+        if (!res.ok) failedIds.add(c.id);
+      }
+
+      let afterEntries = [];
+      if (pending.length - failedIds.size > 0) {
+        try {
+          afterEntries = await readJournal();
+        } catch {}
+        for (const c of pending) {
+          if (failedIds.has(c.id)) continue;
+          const body = commentText(c);
+          if (!afterEntries.some((e) => entryMatches(e, body))) {
+            failedIds.add(c.id);
+          }
+        }
+      }
+
+      const mapping = [];
+      for (const c of pending) {
+        if (failedIds.has(c.id)) continue;
+        const body = commentText(c);
+        const entry = afterEntries.find((e) => entryMatches(e, body));
+        if (entry?.sysId) {
+          mapping.push({ jiraCommentId: c.id, sparkEntrySysId: entry.sysId });
+        }
+      }
+
+      const detail = [
+        `token=${userToken ? "yes" : "no"}`,
+        `existing=${existing.length}`,
+        `journal_entries=${journal.length}`,
+        `url=${location.href}`,
+        `login_wall=${loginWall ? "yes" : "no"}`,
+        `stages=${stages.join(",") || "none"}`,
+        `posted=${pending.length - failedIds.size}/${pending.length}`,
+        `after_entries=${afterEntries.length}`,
+      ].join(", ");
+      if (loginWall) {
+        console.warn("[joshub] Spark comment sync (journal API): session/login wall detected.");
+      } else {
+        console.warn("[joshub] Spark comment sync (journal API) diagnostics:", detail);
+      }
+      return {
+        posted: pending.length - failedIds.size,
+        failed: failedIds.size,
+        skipped: comments.length - pending.length,
+        total: comments.length,
+        hasFields: true,
+        wnFields: 1,
+        url: location.href,
+        loginWall,
+        detail,
+        mapping,
+      };
+    } catch (err) {
+      return {
+        posted: 0,
+        failed: comments.length,
+        skipped: 0,
+        total: comments.length,
+        hasFields: true,
+        wnFields: 1,
+        url: location.href,
+        loginWall: false,
+        detail: `injected-error=${String((err && err.message) || err || "unknown")}`,
+        mapping: [],
+      };
+    } finally {
+      releaseSyncLock();
+    }
+  })();
+}
+
 export {
   getPageData,
   detectSiteInTab,
@@ -2736,4 +2986,5 @@ export {
   listSparkAttachmentItemsInPage,
   uploadSparkAttachmentsInPage,
   postJiraCommentsInSparkPage,
+  postJiraCommentsInOriginPage,
 };
